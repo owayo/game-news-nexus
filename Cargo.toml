@@ -1,0 +1,81 @@
+[workspace]
+members = ["crates/gnn-core", "crates/gnn-fetch", "crates/gnn-cli", "crates/gnn-app", "crates/gnn-schedule", "tools/icons", "tools/dict", "tools/licenses"]
+resolver = "3"
+
+[workspace.package]
+version = "26.11.6"
+edition = "2024"
+license = "MIT"
+authors = ["Yohei"]
+repository = "https://github.com/owayo/game-news-nexus"
+rust-version = "1.99"
+
+[workspace.dependencies]
+gnn-core = { path = "crates/gnn-core" }
+gnn-fetch = { path = "crates/gnn-fetch" }
+gnn-schedule = { path = "crates/gnn-schedule" }
+
+anyhow = "1.0.104"
+thiserror = "2.0.21"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+toml = { version = "1.2.0", features = ["preserve_order"] }
+serde-saphyr = "2.1.1"
+chrono = { version = "0.4.45", features = ["serde"] }
+chrono-tz = "0.10.4"
+regex = "1.13.1"
+unicode-normalization = "0.1.26"
+unicode-segmentation = "1.13.3"
+tempfile = "3.27.0"
+url = { version = "2.5.8", features = ["serde"] }
+sha2 = "0.11.1"
+hex = "0.4.3"
+getrandom = "0.4.3"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-appender = "0.2.5"
+parking_lot = "0.13.0"
+directories = "6.0.0"
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-util = { version = "0.7.20", features = ["rt"] }
+reqwest = { version = "0.13.5", features = ["gzip", "brotli", "deflate", "cookies", "json"] }
+scraper = "0.29.0"
+ego-tree = "0.11.1"
+feed-rs = "3.0.0"
+encoding_rs = "0.8.44"
+chardetng = "1.0.0"
+flume = "0.12.0"
+futures = "0.3.34"
+bytes = "1.12.1"
+flate2 = "1.1.10"
+tar = "0.4.46"
+percent-encoding = "2.3.2"
+clap = { version = "4.6.7", features = ["derive"] }
+schemars = "1.2.3"
+hasami = { git = "https://github.com/owayo/hasami", tag = "v26.11.102", default-features = false, features = ["analyzer"] }
+gpui-kit = "0.9.0"
+tray-icon = "0.26.1"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
+pretty_assertions = "1.4.1"
+embed-resource = "3.0.12"
+# アプリアイコンの書き出し (tools/icons)
+resvg = { version = "0.48.1", default-features = false }
+icns = { version = "0.5.0", default-features = false, features = ["pngio"] }
+# 配布物に入れるクレートのライセンスの一覧 (tools/licenses)
+handlebars = "6.4.4"
+spdx = "0.13.6"
+windows-registry = "0.6.1"
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Threading", "Win32_System_Variant", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev.package."*"]
+opt-level = 2
+# 依存 (gpui など) のデバッグ情報は行番号だけにする。完全なままだと gnn-app の実行ファイルとテストの PDB が
+# 1 つ 300〜500 MB になり、テストの実行ファイルを並べてリンクするとリンカがメモリ不足 (LNK1102) で止まることがある。
+# 自分のクレートのデバッグ情報は完全なまま
+debug = "line-tables-only"

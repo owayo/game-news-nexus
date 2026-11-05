@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!--
+    Game News Nexus のアプリアイコンの元の絵。ゲームのコントローラーを載せた記事のカード (見出しと本文の線) と、
+    新着の印。全面に描く (Windows はこのまま使い、macOS 用は書き出すときに余白と影を足す)。
+    書き出しは `mise run icons` (tools/icons)。
+  -->
+  <defs>
+    <linearGradient id="bg" x1="96" y1="48" x2="928" y2="976" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5B6CFF"/>
+      <stop offset="1" stop-color="#8A3FF0"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="280" cy="160" r="760" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.24"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="lift" x="-25%" y="-25%" width="150%" height="160%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="18" stdDeviation="20" flood-color="#1B1060" flood-opacity="0.32"/>
+    </filter>
+    <!-- 新着の印のまわりを、カードから少し離して見せるための切り欠き -->
+    <mask id="badge-gap" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+      <rect width="1024" height="1024" fill="#FFFFFF"/>
+      <circle cx="812" cy="212" r="126" fill="#000000"/>
+    </mask>
+  </defs>
+
+  <rect width="1024" height="1024" rx="232" fill="url(#bg)"/>
+  <rect width="1024" height="1024" rx="232" fill="url(#glow)"/>
+
+  <g mask="url(#badge-gap)">
+    <!-- 記事のカード -->
+    <rect x="196" y="196" width="632" height="640" rx="72" fill="#FFFFFF" filter="url(#lift)"/>
+    <!-- 見出し -->
+    <rect x="260" y="264" width="420" height="52" rx="26" fill="#4F46E5"/>
+    <!-- コントローラー (十字キーとボタンは白で抜く) -->
+    <g transform="translate(512 467) scale(1.06)">
+      <path fill="#4F46E5" d="M-82 -104 H82 C126 -104 152 -76 162 -34 L176 62 C184 110 158 140 126 130 C104 123 90 106 76 86 L62 62 H-62 L-76 86 C-90 106 -104 123 -126 130 C-158 140 -184 110 -176 62 L-162 -34 C-152 -76 -126 -104 -82 -104 Z"/>
+      <rect x="-142" y="-29" width="92" height="30" rx="8" fill="#FFFFFF"/>
+      <rect x="-111" y="-60" width="30" height="92" rx="8" fill="#FFFFFF"/>
+      <circle cx="96" cy="-45" r="15.5" fill="#FFFFFF"/>
+      <circle cx="127" cy="-14" r="15.5" fill="#FFFFFF"/>
+      <circle cx="96" cy="17" r="15.5" fill="#FFFFFF"/>
+      <circle cx="65" cy="-14" r="15.5" fill="#FFFFFF"/>
+    </g>
+    <!-- 本文 -->
+    <rect x="260" y="656" width="504" height="40" rx="20" fill="#C7D2FE"/>
+    <rect x="260" y="732" width="340" height="40" rx="20" fill="#C7D2FE"/>
+  </g>
+
+  <!-- 新着の印 -->
+  <circle cx="812" cy="212" r="96" fill="#FBBF24" filter="url(#lift)"/>
+</svg>

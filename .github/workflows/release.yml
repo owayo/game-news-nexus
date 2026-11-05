@@ -1,0 +1,410 @@
+# リリース (Actions > Release > Run workflow): 版を JST の yy.m.counter で決めてタグを付け、Windows の
+# インストーラーと macOS の DMG を作って GitHub Release に添付する。dry_run では版の計算だけ。
+#
+# - prepare-release: ci.yml が通ったコミットかを確かめ、版を Cargo.toml と Cargo.lock に書いてコミットし、
+#   タグと一緒に push する
+# - build: タグのコミットをビルドして配布物を作る。Windows (x64) は Inno Setup のインストーラーを作り、実際に
+#   入れて・起動して・消して確かめる。macOS (Apple Silicon だけ。Intel の Mac 向けは作らない) は .app を
+#   ad-hoc 署名して DMG にする (コード署名と公証はしない)
+# - release: 添付をそろえて SHA256SUMS を書き、Release を作って、公開した添付を照らす
+# build の OS は ci.yml の quality と同じにする (dry_run では build が走らないので、配布物の作り方は ci.yml の
+# installer-windows と bundle-macos で確かめる)。
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (compute the next version only; no commit, tag or release)"
+        type: boolean
+        default: false
+
+# 書き込みはジョブ単位で与える (版のコミットとタグの push、Release の作成)
+permissions:
+  contents: read
+
+# 同時に 2 つのリリースを走らせない (同じ番号を 2 回採る)。走っているものは止めない
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  prepare-release:
+    name: Prepare release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      # Check CI on this commit が ci.yml の実行を読む
+      actions: read
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      # 本番は既定のブランチからだけ出す (ほかのブランチから出すと、既定のブランチに無いコミットにタグが付く)。
+      # dry_run はどのブランチでも動くので、workflow の変更をブランチで試せる
+      - name: Check the branch
+        if: ${{ !inputs.dry_run }}
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ]; then
+            echo "::error::Run the release from ${DEFAULT_BRANCH} (this run is on ${GITHUB_REF})"
+            exit 1
+          fi
+
+      # 本番は ci.yml が通ったコミットからだけ出す。このワークフローはテストも clippy も回さないので、落ちている
+      # コミットからでも配布物ができてしまう。push の CI が終わっていない・落ちた・まだ走っていない
+      # (GITHUB_TOKEN で push した版のコミットなど) なら止める
+      - name: Check CI on this commit
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # 同じコミットの push の ci.yml のうち、いちばん新しい実行の状態と結果
+          RESULT=$(gh run list --repo "${GITHUB_REPOSITORY}" --workflow ci.yml --event push \
+            --commit "${GITHUB_SHA}" --limit 1 --json status,conclusion \
+            --jq '.[0] | "\(.status // "none")/\(.conclusion // "none")"')
+          case "${RESULT}" in
+            completed/success)
+              echo "ci.yml succeeded on ${GITHUB_SHA}"
+              ;;
+            "" | none/*)
+              echo "::error::ci.yml has not run on ${GITHUB_SHA}. Push a commit to ${GITHUB_REF_NAME} and wait for CI before releasing"
+              exit 1
+              ;;
+            completed/*)
+              echo "::error::ci.yml ended with ${RESULT#completed/} on ${GITHUB_SHA}. Fix it (or re-run CI) before releasing"
+              exit 1
+              ;;
+            *)
+              echo "::error::ci.yml is still ${RESULT%%/*} on ${GITHUB_SHA}. Wait for it to succeed before releasing"
+              exit 1
+              ;;
+          esac
+
+      - uses: actions/checkout@v7
+
+      # cargo update を mise.toml の版の Rust で実行する (無いとランナーに最初から入っている Rust で動く)
+      - uses: jdx/mise-action@v5
+        with:
+          minimum_release_age: 14d
+          cache: false
+
+      - name: Bump the version
+        id: bump
+        run: |
+          set -euo pipefail
+          # 版は yy.m.counter。年は 2 桁、月はゼロ埋めしない (SemVer は数値の先頭の 0 を禁じ、Cargo は 26.08.100 を
+          # 拒む)。連番は月ごとに 100 から (桁がそろう)。採番は JST で切る。ランナーは UTC なので、素の date では
+          # JST の月初 0〜9 時のリリースが前の月の連番になる
+          YEAR=$(TZ=Asia/Tokyo date +%y)
+          MONTH=$(TZ=Asia/Tokyo date +%-m)
+          # [workspace.package] の version だけを読む (依存の version は触らない)
+          read_version() {
+            awk -F '"' '
+              /^\[/ { in_package = ($0 ~ /^\[workspace\.package\][[:space:]]*(#.*)?$/); next }
+              in_package && /^version[[:space:]]*=/ { print $2; exit }
+            ' Cargo.toml
+          }
+          CURRENT=$(read_version)
+          echo "Current version: ${CURRENT}"
+          COUNTER=100
+          if [[ "${CURRENT}" =~ ^([0-9]{2,4})\.([0-9]{1,2})\.([0-9]+)$ ]]; then
+            # 4 桁の年 (2026.11.105) の版からも続けて採番する
+            if [ "${BASH_REMATCH[1]#20}" = "${YEAR}" ] && [ "$((10#${BASH_REMATCH[2]}))" = "${MONTH}" ]; then
+              COUNTER=$((10#${BASH_REMATCH[3]} + 1))
+            fi
+          fi
+          # 同じ月でも、連番が 100 に届かない版 (最初のリリースの前の 26.11.6 など) の次は 100 にする
+          if [ "${COUNTER}" -lt 100 ]; then
+            COUNTER=100
+          fi
+          VERSION="${YEAR}.${MONTH}.${COUNTER}"
+          TAG="v${VERSION}"
+          echo "Next version: ${VERSION}"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" > /dev/null; then
+            echo "::error::Tag ${TAG} already exists. Check the version in Cargo.toml against the existing tags (to retry a failed release, use \"Re-run failed jobs\" on that run)"
+            exit 1
+          fi
+
+          # [workspace.package] の version の行だけを書き換える。各クレートは version.workspace = true で継ぐ
+          sed -i "/^\[workspace\.package\]/,/^\[/ s/^version = \"[^\"]*\"/version = \"${VERSION}\"/" Cargo.toml
+          test "$(read_version)" = "${VERSION}"
+          # Cargo.lock は自分のクレートの版だけを合わせる (lockfile を作り直すと全依存が最新へ解決し直され、
+          # CI で確かめていない版が配布物に入る)
+          cargo update --workspace
+          git diff --stat
+
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and tag
+        if: ${{ !inputs.dry_run }}
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+          TAG: ${{ steps.bump.outputs.tag }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore(release): ${TAG}" \
+            -m "Release ワークフローが、ワークスペースの版 (Cargo.toml) と Cargo.lock の各クレートの版を ${VERSION} にする。"
+          git tag -a "${TAG}" -m "Release ${TAG}"
+          # ブランチとタグを 1 回で送る。--atomic で、ブランチが先に進んでいて片方だけが通ることを防ぐ
+          git push --atomic origin "HEAD:refs/heads/${DEFAULT_BRANCH}" "refs/tags/${TAG}"
+
+      - name: Dry run
+        if: ${{ inputs.dry_run }}
+        env:
+          TAG: ${{ steps.bump.outputs.tag }}
+        run: |
+          echo "Dry run: would release ${TAG} (no commit, tag or release)"
+          git diff -- Cargo.toml Cargo.lock
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: prepare-release
+    if: ${{ !inputs.dry_run }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    outputs:
+      # 添付の数 (matrix の行ごとに 1 つ)。release のジョブが、集めた添付の数と照らす
+      assets: ${{ strategy.job-total }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # ci.yml の quality と同じ OS。添付の名前は game-news-nexus-<版>-<suffix>
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            suffix: macos-arm64.dmg
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            suffix: windows-x64-setup.exe
+    env:
+      ASSET: game-news-nexus-${{ needs.prepare-release.outputs.version }}-${{ matrix.suffix }}
+      # Windows の実行ファイルは C ランタイムを静的にリンクする (.cargo/config.toml。ci.yml の quality と同じ設定)。
+      # scripts/build-installer.ps1 が、ランタイムの DLL を使う実行ファイルを断る
+    steps:
+      # Windows のランナーは既定で LF を CRLF に変えて checkout する。ci.yml と同じく LF のまま取り、
+      # include_str! で埋め込むファイルの改行を CI で確かめたものとそろえる
+      - name: Keep LF line endings
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.prepare-release.outputs.tag }}
+          persist-credentials: false
+
+      # ビルドのキャッシュ (rust-cache・辞書の actions/cache) は使わない。配布物を作るジョブがキャッシュを読むと、
+      # キャッシュを書けるほかのジョブの汚染が配布物に入る
+      - uses: jdx/mise-action@v5
+        with:
+          minimum_release_age: 14d
+          cache: false
+
+      # mise.toml の rust はホストのツールチェーンと components だけを入れるので、配布のターゲットを足す
+      - name: Add the Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      # gnn-app に埋め込む辞書を hasami のリリースから取る。mise run dict と build.rs が bundled.json の
+      # 大きさと SHA-256 で照らす
+      - run: mise run dict
+
+      - name: Build
+        run: cargo build --release --locked -p gnn-app --target ${{ matrix.target }}
+
+      # .app を作って ad-hoc 署名し (キーチェーンの ID は使わない)、/Applications へのリンク入りの DMG にする。
+      # スクリプトが、署名・DMG の中身・実行ファイルの起動 (--help) まで確かめる
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        env:
+          CODESIGN_IDENTITY: "-"
+        run: mise run dmg -- --target ${{ matrix.target }} --out-dir dist
+
+      # Inno Setup はランナーのイメージに入っている。イメージから外れたときは Chocolatey で入れる
+      - name: Check Inno Setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $iscc = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe", "$env:ProgramFiles\Inno Setup 7\ISCC.exe"
+          ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $iscc -and -not (Get-Command ISCC.exe -ErrorAction SilentlyContinue)) {
+            Write-Output "::warning::Inno Setup is not on the runner image; installing it with Chocolatey"
+            choco install innosetup --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: mise run installer -- -Target ${{ matrix.target }} -OutputDirectory dist
+
+      # できたインストーラーで、利用者ごとに入れる・入れた実行ファイルを --help と --quit (起動していないので何もしない) で
+      # 起動する・消すを確かめる
+      - name: Test the installer (Windows)
+        if: runner.os == 'Windows'
+        run: mise run test-installer -- -InstallerPath dist/${{ env.ASSET }}
+
+      # archive: false で添付のファイルをそのまま上げる (artifact の名前はファイル名になる)
+      - uses: actions/upload-artifact@v7
+        with:
+          path: dist/${{ env.ASSET }}
+          archive: false
+          if-no-files-found: error
+
+  release:
+    name: Release
+    needs: [prepare-release, build]
+    if: ${{ !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      assets: ${{ steps.files.outputs.assets }}
+    env:
+      VERSION: ${{ needs.prepare-release.outputs.version }}
+      TAG: ${{ needs.prepare-release.outputs.tag }}
+    steps:
+      # 添付を build が上げた形のまま集める。download-artifact@v8 は content-type が zip の artifact を展開する
+      # ので skip-decompress を付ける。pattern で添付だけに絞る
+      - uses: actions/download-artifact@v8
+        with:
+          path: release
+          pattern: game-news-nexus-*
+          merge-multiple: true
+          skip-decompress: true
+
+      - name: Write SHA256SUMS
+        id: files
+        env:
+          EXPECTED: ${{ needs.build.outputs.assets }}
+        run: |
+          set -euo pipefail
+          cd release
+          # 添付は build の matrix の行ごとに 1 つ: この版の DMG とインストーラーの、空でない通常のファイル。
+          # ほかのファイル・ディレクトリ・隠しファイルが混ざったり数が合わなかったりしたら、Release を作る前に止める
+          shopt -s nullglob dotglob
+          files=(*)
+          for f in "${files[@]}"; do
+            case "${f}" in
+              "game-news-nexus-${VERSION}-macos-arm64.dmg" | "game-news-nexus-${VERSION}-windows-x64-setup.exe") ;;
+              *)
+                echo "::error::Unexpected entry in release/: ${f}"
+                exit 1
+                ;;
+            esac
+            if [ ! -f "${f}" ] || [ -L "${f}" ] || [ ! -s "${f}" ]; then
+              echo "::error::${f} in release/ is not a non-empty regular file"
+              exit 1
+            fi
+          done
+          if [ "${#files[@]}" -ne "${EXPECTED}" ]; then
+            echo "::error::release/ has ${#files[@]} assets, expected ${EXPECTED} (one per build target)"
+            exit 1
+          fi
+          sha256sum -- "${files[@]}" > SHA256SUMS
+          cat SHA256SUMS
+          echo "assets=$(printf '%s ' *)" >> "$GITHUB_OUTPUT"
+
+      # タイトルはタグ名だけ。本文は導入の手順で、変更点は generate_release_notes が後ろに足す
+      - name: Create the release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ needs.prepare-release.outputs.tag }}
+          name: ${{ needs.prepare-release.outputs.tag }}
+          body: |
+            ## ダウンロード
+
+            | 環境 | 添付 |
+            |---|---|
+            | Windows 10 / 11 (x64) | `game-news-nexus-${{ needs.prepare-release.outputs.version }}-windows-x64-setup.exe` |
+            | macOS (Apple Silicon) | `game-news-nexus-${{ needs.prepare-release.outputs.version }}-macos-arm64.dmg` |
+
+            添付のチェックサムは `SHA256SUMS` にあります。どちらもコード署名と Apple の公証をしていないので、初めて開くときに OS の確認が出ます。
+
+            ### Windows
+
+            インストーラーを実行します。管理者の権限は要らず、使っている人の `%LOCALAPPDATA%\Programs\Game News Nexus` に入ります。「Windows によって PC が保護されました」と出たら、「詳細情報」を押してから「実行」を選びます。起動中に更新すると、インストーラーがアプリを終了させてから入れ替えます。アンインストールは「設定」の「アプリ」から行います (設定と記事のデータは残ります)。
+
+            ### macOS
+
+            DMG を開き、`Game News Nexus` を `Applications` へドラッグしてから、「アプリケーション」から開きます (DMG の中やダウンロードのフォルダから直接開くと、macOS がアプリを一時的な場所から動かすので、ログイン時の自動起動を登録できません)。初めて開くと確認が出て開けないので、「システム設定」の「プライバシーとセキュリティ」にある「このまま開く」を押します。
+          generate_release_notes: true
+          files: release/*
+          fail_on_unmatched_files: true
+
+      # 公開した添付が release/ と名前・大きさ・状態まで一致するか (アップロードの取りこぼしを見つける)。
+      # GitHub が添付の SHA-256 (digest) を返していれば、それも照らす
+      - name: Verify the published assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json assets > "${RUNNER_TEMP}/assets.json"
+          find release -type f -printf '%f %s uploaded\n' | LC_ALL=C sort > "${RUNNER_TEMP}/expected.txt"
+          jq -r '.assets[] | "\(.name) \(.size) \(.state)"' "${RUNNER_TEMP}/assets.json" | LC_ALL=C sort > "${RUNNER_TEMP}/published.txt"
+          if ! diff -u "${RUNNER_TEMP}/expected.txt" "${RUNNER_TEMP}/published.txt"; then
+            echo "::error::The published assets differ from the files in release/"
+            exit 1
+          fi
+          jq -r '.assets[] | select(.digest != null) | "\(.digest | ltrimstr("sha256:"))  \(.name)"' "${RUNNER_TEMP}/assets.json" > "${RUNNER_TEMP}/published.sha256"
+          if [ -s "${RUNNER_TEMP}/published.sha256" ]; then
+            (cd release && sha256sum --check --strict --quiet "${RUNNER_TEMP}/published.sha256")
+          else
+            echo "::warning::GitHub returned no asset digests; skipped the SHA-256 comparison"
+          fi
+
+  # ---- 結果のまとめ ------------------------------------------------------------------------
+  # 途中のジョブが落ちても、飛ばされても (dry_run を含む) 結果を書く
+  release-summary:
+    name: Release summary
+    needs: [prepare-release, build, release]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Write the summary
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
+          PREPARE_RESULT: ${{ needs.prepare-release.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          RELEASE_RESULT: ${{ needs.release.result }}
+          ASSETS: ${{ needs.release.outputs.assets }}
+        run: |
+          set -euo pipefail
+          {
+            if [ "${DRY_RUN}" = "true" ]; then
+              echo "## Dry run: ${TAG:-no version}"
+              echo
+              echo "prepare-release: ${PREPARE_RESULT}. Nothing was committed, tagged or released, and the build did not run (ci.yml checks the packaging)."
+              exit 0
+            fi
+            echo "## ${TAG:-no version}"
+            echo
+            echo "| Job | Result |"
+            echo "|---|---|"
+            echo "| prepare-release | ${PREPARE_RESULT} |"
+            echo "| build | ${BUILD_RESULT} |"
+            echo "| release | ${RELEASE_RESULT} |"
+            if [ -n "${ASSETS:-}" ]; then
+              echo
+              echo "Assets of ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${TAG}:"
+              echo
+              read -r -a assets <<< "${ASSETS}"
+              for asset in "${assets[@]}"; do
+                echo "- \`${asset}\`"
+              done
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

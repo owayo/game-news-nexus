@@ -1,0 +1,29 @@
+# マブラヴ ガールズガーデン
+# yaml-language-server: $schema=../../schema/source.schema.json
+schema: 2
+min_app_version: '26.11.6'
+id: muv_luv_girls_garden
+name: マブラヴ ガールズガーデン
+tags:
+  - dmm
+lists:
+  - kind: html_json
+    request:
+      url: 'https://api-game.muvluv-girls-garden.com/content/AtomGuide'
+    selector: '#atom-data'
+    attr: data-announcements
+    fields:
+      id: '/id'
+      title: '/title'
+      published: '/publishDate'
+      body:
+        blocks: '/bodies'
+        text: '/text'
+        image: '/imageUrl'
+        image_when:
+          pointer: '/type'
+          eq: 6
+      image: '/bannerUrl'
+body:
+  newlines_to_br: true
+  image_in_body: true

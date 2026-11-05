@@ -1,0 +1,28 @@
+# 原神
+# yaml-language-server: $schema=../../schema/source.schema.json
+schema: 2
+min_app_version: '26.11.6'
+id: genshin_impact
+name: 原神
+homepage: 'https://genshin.hoyoverse.com/ja/news'
+tags:
+  - hoyoverse
+note: '公式サイトのニュース一覧が裏で読んでいる HoYoverse のコンテンツ API (getContentList) から取る'
+# dtStartTime は言語によらず UTC+8 (HoYoLAB の投稿時刻と一致することを確かめた)
+timezone: Asia/Shanghai
+# 本文のメンテナンスなどの日時は日本時間で書かれる ((JST) の明記がなくても)。
+# 「サーバー時間」と書かれた日時はアジアサーバーの UTC+8
+schedule:
+  timezone: Asia/Tokyo
+  server_timezone: Asia/Shanghai
+lists:
+  - kind: json
+    request:
+      url: 'https://sg-public-api-static.hoyoverse.com/content_v2_user/app/a1b1f9d3315447cc/getContentList?iAppId=32&iChanId=395&iPageSize=30&iPage=1&sLangKey=ja-jp'
+    items: '/data/list'
+    fields:
+      id: '/iInfoId'
+      title: '/sTitle'
+      url: 'https://genshin.hoyoverse.com/ja/news/detail/{{/iInfoId}}'
+      published: '/dtStartTime'
+      body: '/sContent'

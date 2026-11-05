@@ -1,0 +1,28 @@
+# ガールズクリエイション
+# yaml-language-server: $schema=../../schema/source.schema.json
+schema: 2
+min_app_version: '26.11.6'
+id: girls_creation
+name: ガールズクリエイション
+tags:
+  - dmm
+lists:
+  - kind: json
+    request:
+      url: 'https://girlscreation.com/json/informations.json'
+    items: '/data'
+    fields:
+      id: '/id'
+      title: '/title'
+      published: '/start_time'
+      body: '/description'
+      image: '/image_path'
+body:
+  image_in_body: true
+# 画像は CDN の署名 (s) と期限 (t) 付きで、1 時間ほどで変わる (外すと CDN が返さない)。
+# 同じ画像として扱い、取りに行くときは配信元の URL をそのまま使う。
+url_identity:
+  images:
+    - origin: 'https://cdn.gc.dmmgames.com'
+      path_prefix: '/secure/img/'
+      ignore_query: ['s', 't']

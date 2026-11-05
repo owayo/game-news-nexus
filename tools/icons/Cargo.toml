@@ -1,0 +1,16 @@
+[package]
+name = "gnn-icons"
+description = "アプリアイコンを SVG から書き出す (mise run icons)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+image.workspace = true
+resvg.workspace = true
+icns.workspace = true

@@ -1,0 +1,102 @@
+# ツールのバージョンを固定する。`mise install` で揃う。
+# 更新は `depup --mise` で行う。
+[tools]
+rust = { version = "1.99.1", components = "rustfmt,clippy" }
+
+[env]
+# macOS: cc crate (同梱の SQLite・aws-lc などの C のコード) と rustc のデプロイメントターゲットをそろえる。
+# 未指定だと cc crate は C をホストの SDK の版でビルドし、rustc の既定 (aarch64-apple-darwin は 11.0) と
+# ずれて、実行ファイルが新しい macOS でしか動かなくなる (リンカも警告を出す)。
+# 素の cargo (mise の shim)・mise のタスク・CI (mise-action が後続のステップへ渡す) が同じ値を読むよう、
+# ここを唯一の正にする。Windows では使われない
+MACOSX_DEPLOYMENT_TARGET = "11.0"
+
+[tasks.dict]
+description = "gnn-schedule に埋め込む hasami の辞書を取得する (ビルドの前に要る。2 回目からは照合だけ)"
+run = "cargo run -q -p gnn-dict"
+
+# 辞書 (gnn-schedule が埋め込む) が要るタスクは dict を先に動かす。2 回目からは照合だけで済む。
+[tasks.build]
+description = "全クレートをビルドする"
+depends = ["dict"]
+run = "cargo build --workspace"
+
+[tasks.release]
+description = "リリースビルドを作る"
+depends = ["dict"]
+run = "cargo build --release -p gnn-app"
+
+[tasks.run]
+description = "アプリを起動する"
+depends = ["dict"]
+run = "cargo run -p gnn-app"
+
+[tasks.test]
+description = "全クレートのテストを実行する"
+depends = ["dict"]
+run = "cargo test --workspace"
+
+[tasks.lint]
+description = "rustfmt と clippy で検査する"
+depends = ["dict"]
+run = ["cargo fmt --all -- --check", "cargo clippy --workspace --all-targets -- -D warnings"]
+
+[tasks.fetch-once]
+description = "画面を出さずに全ソースを一度だけ取得し、予定も読み取る"
+depends = ["dict"]
+run = "cargo run -p gnn-app -- --fetch-once"
+
+[tasks.catalog-check]
+description = "同梱のカタログ (crates/gnn-core/catalog) を検査する"
+run = "cargo run -q -p gnn-cli -- check crates/gnn-core/catalog"
+
+[tasks.catalog-try]
+description = "同梱のカタログのソースを実サイトで試す (引数でソース ID を絞れる)"
+run = "cargo run -q -p gnn-cli -- try crates/gnn-core/catalog"
+
+[tasks.icons]
+description = "アプリアイコンを SVG (crates/gnn-app/assets/icons) から書き出す"
+run = "cargo run -q -p gnn-icons"
+
+[tasks.schema]
+description = "取得定義の JSON Schema を作り直す"
+run = "cargo run -q -p gnn-cli -- schema --out crates/gnn-core/catalog/schema/source.schema.json"
+
+[tasks.licenses]
+description = "配布物に入れる Rust のクレートのライセンスの一覧を cargo-about で作り直す (-- --check は古くないかを確かめるだけ)"
+# この作業だけが使うので、ここで版を固定する (公開から 14 日以上たった版)。depup はタスクの tools を上げないので、
+# 上げるときは手で書き換え、mise run licenses で一覧を作り直す (gnn-licenses が、ここの版と使った版を照らす)
+tools = { "github:EmbarkStudios/cargo-about" = "0.9.2" }
+run = "cargo run -q -p gnn-licenses --"
+
+# ---- 配布物 (packaging/・scripts/) --------------------------------------------------------------
+# どれも作り終えた実行ファイルをまとめるだけで、ビルドはしない (先に mise run dict と mise run release)。
+# 出力は <target>/dist。--target などの引数は `mise run dmg -- --target aarch64-apple-darwin` のように渡す。
+
+[tasks.bundle]
+description = "macOS のアプリ (.app) を作って署名する (macOS 専用。引数は scripts/bundle-macos.sh --help)"
+run = "bash scripts/bundle-macos.sh"
+
+[tasks.dmg]
+description = "macOS の配布用 DMG を作る (.app も作り直す。macOS 専用)"
+run = "bash scripts/bundle-macos.sh --dmg"
+
+[tasks.installer]
+description = "Windows のインストーラー (setup.exe) を Inno Setup で作る (Windows 専用。Inno Setup 6.3 以降が要る)"
+run = '''printf '%s\n' 'mise run installer は Windows で実行します (macOS は mise run dmg)' >&2; exit 1'''
+run_windows = "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-installer.ps1"
+
+[tasks.test-bundle]
+description = "macOS の .app と DMG の作り方を、アプリの代わりの小さな実行ファイルで確かめる (macOS 専用)"
+run = "bash scripts/test-bundle-macos.sh"
+
+[tasks.test-installer]
+description = "インストーラーを入れて・更新して・消して確かめる (CI 専用。利用者のスタートメニューとレジストリを書き換える)"
+run = '''printf '%s\n' 'mise run test-installer は Windows の CI で実行します' >&2; exit 1'''
+run_windows = "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-installer-windows.ps1"
+
+[tasks.lint-scripts]
+description = "GitHub Actions のワークフロー (actionlint) と配布用のシェルスクリプト (shellcheck) を検査する"
+# この検査だけが使うので、ここで版を固定する (公開から 14 日以上たった版)
+tools = { "aqua:rhysd/actionlint" = "1.7.12", "aqua:koalaman/shellcheck" = "0.11.0" }
+run = ["actionlint", "shellcheck scripts/bundle-macos.sh scripts/test-bundle-macos.sh"]

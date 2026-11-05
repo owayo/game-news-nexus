@@ -1,0 +1,182 @@
+# CI: Windows と macOS で書式・Clippy・テストを回し、配布物 (インストーラーと DMG) の作り方を確かめる。
+#
+# - installer-windows: Inno Setup のインストーラーを、アプリの代わり (scripts/test-installer-fixture.cs を
+#   .NET Framework の csc.exe で作った小さな実行ファイル) を入れて作り、入れる・起動中に更新する・起動中に消すまで
+#   試す (mise run test-installer)。起動中のアプリを --quit で終わらせることと、終わらないときに Restart Manager・
+#   taskkill で閉じることも確かめる。Rust のビルドは要らない
+# - bundle-macos: macOS の .app と DMG を、アプリの代わりの小さな実行ファイルで作って確かめる
+#   (mise run test-bundle)。ワークフローとシェルスクリプトの検査 (mise run lint-scripts) もここで回す
+# - quality: Windows と macOS で、配布物に入れるクレートのライセンスの一覧が古くないこと (mise run licenses -- --check)・
+#   辞書なしで gnn-cli をビルドできること・カタログの検査 (mise run catalog-check)・辞書の取得 (mise run dict)・
+#   書式と Clippy (mise run lint)・テスト (mise run test)
+# Linux には配らないので、Linux のジョブは置かない。配布物は release.yml がタグのコミットから作る
+# (release.yml の dry_run ではビルドが走らないので、作り方はここの installer-windows と bundle-macos で確かめる)。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  installer-windows:
+    name: Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 15
+    # Rust を使わないので、mise.toml の rust を入れない
+    env:
+      MISE_DISABLE_TOOLS: rust
+    steps:
+      # Windows のランナーは既定で LF を CRLF に変えて checkout する。配布物に入れるライセンスなどの改行を
+      # 手元とそろえる
+      - name: Keep LF line endings
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # ツールの版は mise.toml が正。mise 本体は公開から 14 日以上たった最新の版を、署名付きの checksum で
+      # 確かめて入れる。cache は切る (効いた回だけツールが欠ける。jdx/mise-action#215)
+      - uses: jdx/mise-action@v5
+        with:
+          minimum_release_age: 14d
+          cache: false
+
+      # mise のタスクは Windows PowerShell 5.1 で動かすので、その構文解析器で scripts/*.ps1 を全部読む。
+      # 日本語を含むスクリプトは BOM がないと 5.1 がコンソールのコードページで読んで壊れるので、BOM も確かめる
+      - name: Parse the PowerShell scripts
+        shell: powershell
+        run: |
+          $failed = $false
+          foreach ($file in Get-ChildItem -Path scripts -Filter *.ps1) {
+            $bytes = [IO.File]::ReadAllBytes($file.FullName)
+            $hasBom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+            if (-not $hasBom -and ($bytes | Where-Object { $_ -ge 0x80 } | Select-Object -First 1)) {
+              Write-Output "::error file=scripts/$($file.Name)::Save as UTF-8 with BOM (Windows PowerShell 5.1 misreads non-ASCII text without it)"
+              $failed = $true
+            }
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref] $tokens, [ref] $errors) | Out-Null
+            foreach ($parseError in $errors) {
+              Write-Output "::error file=scripts/$($file.Name),line=$($parseError.Extent.StartLineNumber)::$($parseError.Message)"
+              $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }
+
+      # Inno Setup はランナーのイメージに入っている (Windows Server 2025 のイメージの InnoSetup)。
+      # イメージから外れたときは Chocolatey で入れる
+      - name: Check Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe", "$env:ProgramFiles\Inno Setup 7\ISCC.exe"
+          ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+          if (-not $iscc -and -not (Get-Command ISCC.exe -ErrorAction SilentlyContinue)) {
+            Write-Output "::warning::Inno Setup is not on the runner image; installing it with Chocolatey"
+            choco install innosetup --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - run: mise run test-installer
+
+  bundle-macos:
+    name: macOS bundle
+    runs-on: macos-latest
+    timeout-minutes: 15
+    # Rust を使わないので、mise.toml の rust を入れない (actionlint と shellcheck は lint-scripts のタスクが入れる)
+    env:
+      MISE_DISABLE_TOOLS: rust
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@v5
+        with:
+          minimum_release_age: 14d
+          cache: false
+
+      - run: mise run lint-scripts
+      - run: mise run test-bundle
+
+  quality:
+    name: Quality (${{ matrix.os }})
+    # 軽い検査が通ってから、時間のかかるビルドを始める
+    needs: [installer-windows, bundle-macos]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # release.yml の build と同じ OS (配る OS だけ)
+        os: [windows-latest, macos-latest]
+    # Windows の実行ファイルは C ランタイムを静的にリンクする (.cargo/config.toml)。release.yml の build と同じ設定で、
+    # 配る形でテストする
+    steps:
+      # Windows のランナーは既定で LF を CRLF に変えて checkout する。include_str! で埋め込むカタログや
+      # テストの期待値の改行を手元とそろえる
+      - name: Keep LF line endings
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@v5
+        with:
+          minimum_release_age: 14d
+          cache: false
+
+      # target/ と ~/.cargo のキャッシュ (鍵に rustc の版が入るので、mise.toml の rust を上げると作り直す)
+      - uses: Swatinem/rust-cache@v2
+
+      # mise のタスクは --locked を付けないので、Cargo.lock が Cargo.toml と食い違っていないかをここで確かめる
+      - name: Check Cargo.lock
+        run: cargo fetch --locked
+
+      # 配布物に入れる Rust のクレートのライセンスの一覧 (crates/gnn-app/assets/licenses/THIRD_PARTY_LICENSES.md) が
+      # 依存と設定 (packaging/licenses/) から作り直したものと同じか。許していないライセンス・cargo-about の警告・
+      # 理由のない標準の文面への置き換えもここで止める (tools/licenses)。cargo-about の版は mise.toml のタスクが固定する
+      - name: Check the third-party licenses
+        run: mise run licenses -- --check
+
+      # カタログのリポジトリの CI は `cargo install --git ... gnn-cli` で gnn-cli を入れる。gnn-cli が辞書
+      # (gnn-schedule) に依存すると、そちらの CI が辞書を用意できずに止まるので、辞書がないままビルドする
+      - name: Build gnn-cli without the dictionary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -e crates/gnn-schedule/dict/ipadic.hsd ]; then
+            echo "::error::The dictionary is already present; this step must run before mise run dict"
+            exit 1
+          fi
+          cargo build --locked -p gnn-cli
+
+      - run: mise run catalog-check
+
+      # 辞書 (hasami のリリースの ipadic.hsd) を取っておく。鍵は bundled.json (固定したリリース・大きさ・
+      # SHA-256) のハッシュなので、辞書を上げると取り直す。中身は mise run dict と build.rs が SHA-256 で照らす
+      - name: Cache the dictionary
+        uses: actions/cache@v6
+        with:
+          path: crates/gnn-schedule/dict/ipadic.hsd
+          key: hasami-dict-${{ runner.os }}-${{ hashFiles('crates/gnn-schedule/dict/bundled.json') }}
+
+      - run: mise run dict
+      - run: mise run lint
+      - run: mise run test

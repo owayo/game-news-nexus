@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Game News Nexus.app の Info.plist のひな形。scripts/bundle-macos.sh が .app に写して、次の値を埋める。
+    CFBundleShortVersionString・CFBundleVersion: Cargo.toml の [workspace.package] の version
+    LSMinimumSystemVersion: 実行ファイルの最小の macOS (LC_BUILD_VERSION の minos)
+  CFBundleIdentifier と表示名は固定。アプリのコード (macOS の自動起動など) も同じ値を使う。
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key><string>io.github.owayo.game-news-nexus</string>
+    <key>CFBundleName</key><string>Game News Nexus</string>
+    <key>CFBundleDisplayName</key><string>Game News Nexus</string>
+    <key>CFBundleExecutable</key><string>game-news-nexus</string>
+    <key>CFBundleIconFile</key><string>app.icns</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <!-- 画面は日本語だけなので、システムが出す部分 (メニューの標準項目など) も日本語にする -->
+    <key>CFBundleDevelopmentRegion</key><string>ja</string>
+    <key>CFBundleShortVersionString</key><string>0.0.0</string>
+    <key>CFBundleVersion</key><string>0.0.0</string>
+    <key>LSMinimumSystemVersion</key><string>11.0</string>
+    <key>LSApplicationCategoryType</key><string>public.app-category.news</string>
+    <key>NSHumanReadableCopyright</key><string>Copyright (c) 2026 Yohei</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
+</dict>
+</plist>

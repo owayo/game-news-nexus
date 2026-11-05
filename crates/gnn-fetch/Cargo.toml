@@ -1,0 +1,44 @@
+[package]
+name = "gnn-fetch"
+description = "Game News Nexus の取得エンジン (HTTP・プリセット・本文整形)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+gnn-core.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+regex.workspace = true
+url.workspace = true
+sha2.workspace = true
+hex.workspace = true
+tracing.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+scraper.workspace = true
+ego-tree.workspace = true
+feed-rs.workspace = true
+encoding_rs.workspace = true
+chardetng.workspace = true
+unicode-normalization.workspace = true
+futures.workspace = true
+parking_lot.workspace = true
+bytes.workspace = true
+flate2.workspace = true
+tar.workspace = true
+percent-encoding.workspace = true
+hasami.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util"] }

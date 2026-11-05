@@ -1,0 +1,13 @@
+# GAME Watch
+# yaml-language-server: $schema=../../schema/source.schema.json
+schema: 2
+min_app_version: '26.11.6'
+id: game_watch
+name: GAME Watch
+homepage: 'https://game.watch.impress.co.jp/'
+tags:
+  - media
+lists:
+  - kind: feed
+    request:
+      url: 'https://game.watch.impress.co.jp/data/rss/1.0/gmw/feed.rdf'

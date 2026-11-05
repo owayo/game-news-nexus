@@ -1,0 +1,33 @@
+#include <winver.h>
+#include "version.rh"
+
+1 ICON "icons/app.ico"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION GNN_FILEVERSION
+PRODUCTVERSION GNN_FILEVERSION
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+FILEFLAGS 0x0L
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Yohei"
+            VALUE "FileDescription", "Game News Nexus"
+            VALUE "FileVersion", GNN_VERSION
+            VALUE "InternalName", "game-news-nexus"
+            VALUE "LegalCopyright", "Copyright (c) 2026 Yohei"
+            VALUE "OriginalFilename", "game-news-nexus.exe"
+            VALUE "ProductName", "Game News Nexus"
+            VALUE "ProductVersion", GNN_VERSION
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

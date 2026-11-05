@@ -1,0 +1,26 @@
+# エスカレーションヒロインズ
+# yaml-language-server: $schema=../../schema/source.schema.json
+schema: 2
+min_app_version: '26.11.6'
+id: escalation_heroines
+name: エスカレーションヒロインズ
+tags:
+  - dmm
+lists:
+  - kind: html_json
+    request:
+      url: 'https://prod.e-heroines.net/server/product/AppSub'
+    selector: app-sub-container
+    attr: ':info-list'
+    fields:
+      id: '/id'
+      title: '/title'
+      published: '/updated'
+detail:
+  kind: json
+  request:
+    url: 'https://prod.e-heroines.net/server/product/api/Sub/Notice/GetInfo/{{item.id}}'
+  fields:
+    body: '/text'
+body:
+  base_url: 'https://prod.e-heroines.net/'

@@ -1,0 +1,17 @@
+{
+  "hasami_tag": "v26.11.102",
+  "format_version": 6,
+  "dictionary": {
+    "name": "ipadic",
+    "summary": "IPAdic",
+    "file": "ipadic.hsd",
+    "size": 15714402,
+    "sha256": "736b3d4aa1b61a8129ba8e838aeea49df69c59d5f61da4779646c5f7e8e3e004",
+    "compressed": {
+      "file": "ipadic.hsd.zst",
+      "size": 5806862,
+      "sha256": "3dcc345b7e0df6e93488b0a63ada6e8e1fc6caa0755da0db248f14682e0f79bc"
+    },
+    "sources": "ipadic@61b90ba6e669"
+  }
+}

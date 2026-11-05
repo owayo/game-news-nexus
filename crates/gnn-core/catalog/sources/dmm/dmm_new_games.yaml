@@ -1,0 +1,26 @@
+# DMM GAMES 新作
+# yaml-language-server: $schema=../../schema/source.schema.json
+schema: 2
+min_app_version: '26.11.6'
+id: dmm_new_games
+name: DMM GAMES 新作
+channel: releases
+tags:
+  - dmm
+interval_minutes: 360
+lists:
+  - kind: html
+    request:
+      url: 'https://games.dmm.com/list/pc?game=browser&sort=new'
+    items: section ul li a
+    require: 'svg[data-testid="FiberNewIcon"]'
+    fields:
+      id:
+        attr: data-gtm-app-id
+      title: h3
+      url:
+        attr: href
+      image:
+        selector: 'img[class*="__thumbnailImage__"]'
+        attr: src
+      note: p

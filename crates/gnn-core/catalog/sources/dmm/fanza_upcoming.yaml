@@ -1,0 +1,26 @@
+# FANZA GAMES 近日リリース
+# yaml-language-server: $schema=../../schema/source.schema.json
+schema: 2
+min_app_version: '26.11.6'
+id: fanza_upcoming
+name: FANZA GAMES 近日リリース
+channel: releases
+tags:
+  - dmm
+  - fanza
+interval_minutes: 360
+lists:
+  - kind: html
+    request:
+      url: 'https://www.dmm.co.jp/age_check/=/declared=yes/?rurl=https%3A%2F%2Fgames.dmm.co.jp%2Flist%2Fupcoming'
+    items: li article
+    fields:
+      id: '[class*="__bodyWrapper__"] > p:nth-of-type(1)'
+      title: '[class*="__bodyWrapper__"] > p:nth-of-type(1)'
+      url:
+        selector: a
+        attr: href
+      image:
+        selector: img
+        attr: src
+      note: '[class*="__bodyWrapper__"] > p:nth-of-type(2)'

@@ -1,0 +1,18 @@
+# カタログのグループ。アプリのソース画面での並び順と見出しになる。
+# default: true のグループのソースは、アプリを初めて起動したときに on になる。
+# あとからそのグループに足したソースも、利用者のアプリが初めて取り込んだときに on になる。
+groups:
+  - id: dmm
+    name: DMM GAMES
+    description: 'DMM GAMES / FANZA GAMES のタイトルのお知らせと、新作・近日リリース'
+    default: true
+  - id: hoyoverse
+    name: HoYoverse
+    description: '原神・崩壊：スターレイル・ゼンレスゾーンゼロの公式ニュース'
+    default: true
+  - id: steam
+    name: Steam
+    description: 'Steam のニュースフィード'
+  - id: media
+    name: ゲームメディア
+    description: 'ゲーム情報サイトの RSS'

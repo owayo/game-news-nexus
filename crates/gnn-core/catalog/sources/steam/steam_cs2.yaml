@@ -1,0 +1,14 @@
+# Counter-Strike 2 (Steam ニュース)
+# yaml-language-server: $schema=../../schema/source.schema.json
+schema: 2
+min_app_version: '26.11.6'
+id: steam_cs2
+name: 'Counter-Strike 2 (Steam ニュース)'
+homepage: 'https://store.steampowered.com/app/730/'
+tags:
+  - steam
+note: 'URL の 730 を他のゲームの App ID に変えると、そのゲームの Steam ニュースを取れる'
+lists:
+  - kind: feed
+    request:
+      url: 'https://store.steampowered.com/feeds/news/app/730/?l=japanese'

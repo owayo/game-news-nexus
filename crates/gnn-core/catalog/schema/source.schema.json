@@ -1,0 +1,1157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SourceConfig",
+  "description": "1 つの取得元。",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "description": "書式の版。今は `2`。",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "min_app_version": {
+      "description": "このソースに必要なアプリの最小の版 (`26.12.0` など)。古いアプリはこのソースの\n前の版を使い続ける。",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "id": {
+      "description": "ソースの識別子。英小文字・数字・`_`・`-` だけを使う。カタログではファイル名と同じにする。",
+      "type": "string"
+    },
+    "name": {
+      "description": "画面に出す名前。",
+      "type": "string"
+    },
+    "channel": {
+      "description": "お知らせか、新作・近日リリースの一覧か。",
+      "$ref": "#/$defs/Channel"
+    },
+    "homepage": {
+      "description": "公式サイトなど、ソースの案内先。",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "icon": {
+      "description": "アイコン画像の URL。",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "note": {
+      "description": "利用者向けの説明。",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "timezone": {
+      "description": "タイムゾーンの指定がない日時をどの地域時刻として読むか。既定は `Asia/Tokyo`。",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "schedule": {
+      "description": "本文から予定 (メンテナンスやイベントの期間) を読むときの地域時刻。",
+      "$ref": "#/$defs/ScheduleSpec"
+    },
+    "interval_minutes": {
+      "description": "取得間隔 (分) の目安。省略時はアプリ設定の既定値。",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "max_age_days": {
+      "description": "これより古い記事は取り込まない (日)。省略時はアプリ設定の既定値。",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint32",
+      "minimum": 0
+    },
+    "max_items": {
+      "description": "1 回の取得で読む記事の上限。詳細ページの取得数を抑える。",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
+      "minimum": 0
+    },
+    "prepare": {
+      "description": "1. 事前の取得。応答から取り出した値を `{{vars.名前}}` で後の段に渡す。",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/PrepareStep"
+      }
+    },
+    "lists": {
+      "description": "2. 一覧。複数書くと宣言順にまとめ、同じ記事は先の一覧の値を使う。",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ListSpec"
+      }
+    },
+    "detail": {
+      "description": "4. 記事ごとの詳細ページ。",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DetailSpec"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "body": {
+      "description": "5. 本文の整え方。",
+      "$ref": "#/$defs/BodySpec"
+    },
+    "url_identity": {
+      "description": "URL の同一性。配信元が取得のたびに変える問い合わせ (署名・期限など) があっても、\n同じ画像として扱う決まり。",
+      "$ref": "#/$defs/UrlIdentity"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "id",
+    "name",
+    "lists"
+  ],
+  "$defs": {
+    "Channel": {
+      "description": "ソースの出し先。",
+      "oneOf": [
+        {
+          "description": "お知らせ。取得した記事を蓄積する。",
+          "type": "string",
+          "const": "news"
+        },
+        {
+          "description": "新作・近日リリース。取得のたびに一覧を置き換える。",
+          "type": "string",
+          "const": "releases"
+        }
+      ]
+    },
+    "ScheduleSpec": {
+      "description": "本文から予定 (メンテナンスやイベントの期間) を読むときの地域時刻。\n\n投稿日時を読む `timezone` とは分ける。一覧の日時と本文の日時で地域時刻が違う配信元があるため\n(一覧は UTC+8 で、本文のメンテナンスは日本時間で書かれている、など)。",
+      "type": "object",
+      "properties": {
+        "timezone": {
+          "description": "本文の日時に地域時刻の明記 (`(JST)` など) がないとき、どの地域時刻として読むか。\n省略時はソースの `timezone`。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "server_timezone": {
+          "description": "本文に「サーバー時間」と書かれた日時の地域時刻。省略時は決めない (その日時の地域時刻を補わない)。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "PrepareStep": {
+      "description": "事前の取得。応答から値を取り出し、`{{vars.名前}}` として後の段で使う。",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "応答の読み方。",
+          "$ref": "#/$defs/DocumentKind"
+        },
+        "request": {
+          "$ref": "#/$defs/RequestSpec"
+        },
+        "bind": {
+          "description": "取り出す値。名前と取り出し方の組。",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/BindValue"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "request",
+        "bind"
+      ]
+    },
+    "DocumentKind": {
+      "description": "応答の読み方。",
+      "oneOf": [
+        {
+          "description": "JSON。値は JSON Pointer で取り出す。",
+          "type": "string",
+          "const": "json"
+        },
+        {
+          "description": "HTML。値は CSS セレクタで取り出す。",
+          "type": "string",
+          "const": "html"
+        },
+        {
+          "description": "テキスト。値は正規表現で取り出す。",
+          "type": "string",
+          "const": "text"
+        }
+      ]
+    },
+    "RequestSpec": {
+      "description": "HTTP リクエスト。",
+      "type": "object",
+      "properties": {
+        "url": {
+          "description": "URL。`{{vars.名前}}` などを差し込める (ホストの部分には差し込めない)。",
+          "type": "string"
+        },
+        "method": {
+          "$ref": "#/$defs/HttpMethod"
+        },
+        "query": {
+          "description": "URL に付け足す問い合わせ (`?名前=値`)。値は符号化して付ける。",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "headers": {
+          "description": "追加のヘッダ。手元のソースでは値に `{{secret:名前}}` と書くと `secrets.toml` の値になる\n(カタログのソースでは使えない)。",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "body": {
+          "description": "POST の本文。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "encoding": {
+          "description": "応答の文字コードを固定する (`shift_jis` など)。省略時は応答から判定する。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "url"
+      ]
+    },
+    "HttpMethod": {
+      "type": "string",
+      "enum": [
+        "GET",
+        "POST"
+      ]
+    },
+    "BindValue": {
+      "description": "事前の取得で取り出す値。文字列だけを書くと、JSON なら JSON Pointer、HTML なら\nCSS セレクタ (要素の文字列)、テキストなら正規表現 (最初の括弧の中) として読む。",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/BindSpec"
+        }
+      ]
+    },
+    "BindSpec": {
+      "type": "object",
+      "properties": {
+        "pointer": {
+          "description": "JSON の値を指す JSON Pointer。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selector": {
+          "description": "HTML の要素の CSS セレクタ。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "attr": {
+          "description": "要素の属性を取る。省略時は要素の文字列。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "regex": {
+          "description": "取り出した文字列 (テキストなら応答全体) に当てる正規表現。最初の括弧の中を値にする。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ListSpec": {
+      "description": "一覧。`kind` で取得方式を選ぶ。",
+      "oneOf": [
+        {
+          "description": "RSS / Atom / JSON Feed。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "feed"
+            },
+            "name": {
+              "description": "一覧の名前。診断に出す。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "request": {
+              "$ref": "#/$defs/RequestSpec"
+            },
+            "content": {
+              "description": "本文に使う要素。",
+              "$ref": "#/$defs/FeedContent"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "request"
+          ]
+        },
+        {
+          "description": "JSON の配列を読む。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "json"
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "request": {
+              "$ref": "#/$defs/RequestSpec"
+            },
+            "items": {
+              "description": "記事の配列を指す JSON Pointer。空文字はルート。",
+              "type": "string"
+            },
+            "filter": {
+              "description": "取り込む記事の条件。すべて満たしたものだけを残す。",
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              }
+            },
+            "fields": {
+              "$ref": "#/$defs/JsonFields"
+            },
+            "pages": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PagesSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "request",
+            "items",
+            "fields"
+          ]
+        },
+        {
+          "description": "HTML の一覧を CSS セレクタで読む。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "html"
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "request": {
+              "$ref": "#/$defs/RequestSpec"
+            },
+            "items": {
+              "description": "記事 1 件に当たる要素の CSS セレクタ。",
+              "type": "string"
+            },
+            "require": {
+              "description": "指定すると、この CSS セレクタに合う要素を含む記事だけを残す。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "fields": {
+              "$ref": "#/$defs/HtmlFields"
+            },
+            "pages": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PagesSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "request",
+            "items"
+          ]
+        },
+        {
+          "description": "HTML 要素に埋め込まれた JSON を読む。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "html_json"
+            },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "request": {
+              "$ref": "#/$defs/RequestSpec"
+            },
+            "selector": {
+              "description": "JSON を持つ要素の CSS セレクタ。",
+              "type": "string"
+            },
+            "attr": {
+              "description": "JSON を持つ属性。省略時は要素の本文 (`<script type=\"application/json\">` など)。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "items": {
+              "description": "記事の配列を指す JSON Pointer。省略時 (空文字) は JSON そのもの。",
+              "type": "string"
+            },
+            "filter": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              }
+            },
+            "fields": {
+              "$ref": "#/$defs/JsonFields"
+            },
+            "pages": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PagesSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "request",
+            "selector",
+            "fields"
+          ]
+        }
+      ]
+    },
+    "FeedContent": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "content",
+            "summary"
+          ]
+        },
+        {
+          "description": "本文 (content) があれば本文、なければ概要 (summary)。",
+          "type": "string",
+          "const": "auto"
+        }
+      ]
+    },
+    "Condition": {
+      "description": "JSON の値に対する条件。`eq`・`ne`・`exists`・`contains` のどれか 1 つを書く。",
+      "type": "object",
+      "properties": {
+        "pointer": {
+          "description": "記事から見た JSON Pointer。",
+          "type": "string"
+        },
+        "eq": true,
+        "ne": true,
+        "exists": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "contains": {
+          "description": "文字列に含む。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pointer"
+      ]
+    },
+    "JsonFields": {
+      "description": "JSON の記事から値を取り出す設定。\n\n値は `/title` のような JSON Pointer か、`'https://example.com/{{/id}}'` のような\nテンプレートで書く。テンプレートの `{{/pointer}}` には記事の値が入る。",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "記事を見分ける値。省略時は URL、それもなければタイトル。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "published": {
+          "description": "投稿日時。文字列の日時か UNIX 時刻 (秒・ミリ秒)。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "body": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonBody"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "image": {
+          "description": "バナーやサムネイルの画像 URL。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "note": {
+          "description": "発売時期などの補足。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "JsonBody": {
+      "description": "JSON の本文。HTML 文字列か、画像と文章のブロックの配列。",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/BlocksSpec"
+        }
+      ]
+    },
+    "BlocksSpec": {
+      "description": "本文を表すブロックの配列。画像のブロックは `<img>`、それ以外は段落にする。",
+      "type": "object",
+      "properties": {
+        "blocks": {
+          "description": "ブロックの配列を指す JSON Pointer。",
+          "type": "string"
+        },
+        "text": {
+          "description": "ブロックの文章を指す JSON Pointer。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "image": {
+          "description": "ブロックの画像 URL を指す JSON Pointer。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "image_when": {
+          "description": "画像のブロックを見分ける条件。省略時は画像 URL があるものを画像とみなす。",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Condition"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "blocks"
+      ]
+    },
+    "PagesSpec": {
+      "description": "ページ送り。どの方式も `max_pages` で読むページ数を限る。\n\n記事のないページ、同じ URL やカーソルの繰り返しで止める。お知らせでは、ページの記事が\nすべて取得済みか古ければ、それより先は読まない。",
+      "oneOf": [
+        {
+          "description": "ページ番号 (またはオフセット) を増やしながら取る。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "page"
+            },
+            "param": {
+              "description": "番号を付ける問い合わせの名前。省略時は URL の `{{page}}` に入れる。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "start": {
+              "description": "最初の番号。",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "step": {
+              "description": "番号の増え方。オフセットなら 1 ページの件数。",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "max_pages": {
+              "description": "読むページ数の上限 (最大 10)。",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "max_pages"
+          ]
+        },
+        {
+          "description": "応答の中の「次のページ」の URL をたどる。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "next_link"
+            },
+            "pointer": {
+              "description": "JSON の一覧: 次のページの URL を指す JSON Pointer。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "selector": {
+              "description": "HTML の一覧: 次のページへのリンクの CSS セレクタ。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "attr": {
+              "description": "HTML の一覧: URL を持つ属性。既定は `href`。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "max_pages": {
+              "description": "読むページ数の上限 (最大 10)。",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "max_pages"
+          ]
+        },
+        {
+          "description": "応答の中のカーソルを、次のリクエストの問い合わせに付ける。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "cursor"
+            },
+            "pointer": {
+              "description": "次のカーソルを指す JSON Pointer。",
+              "type": "string"
+            },
+            "param": {
+              "description": "カーソルを付ける問い合わせの名前。",
+              "type": "string"
+            },
+            "max_pages": {
+              "description": "読むページ数の上限 (最大 10)。",
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "pointer",
+            "param",
+            "max_pages"
+          ]
+        }
+      ]
+    },
+    "HtmlFields": {
+      "description": "HTML の記事から値を取り出す設定。",
+      "type": "object",
+      "properties": {
+        "id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HtmlValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "title": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HtmlValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "url": {
+          "description": "省略時は記事要素 (またはその中の最初の `<a>`) の `href`。",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HtmlValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "published": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HtmlValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "body": {
+          "description": "詳細ページでは、省略時に文書の `<body>` 全体を本文にする。",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HtmlValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "image": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HtmlValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "note": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HtmlValue"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "HtmlValue": {
+      "description": "HTML から値を取り出す設定。CSS セレクタだけを書くと、その要素の文字列を取る。",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/HtmlValueSpec"
+        }
+      ]
+    },
+    "HtmlValueSpec": {
+      "type": "object",
+      "properties": {
+        "selector": {
+          "description": "記事要素から見た CSS セレクタ。省略時は記事要素そのもの。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "extract": {
+          "description": "取り出し方。省略時は項目ごとの既定 (本文は HTML、それ以外は文字列)。",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Extract"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attr": {
+          "description": "属性の値を取る。`extract` より優先する。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "remove": {
+          "description": "取り出す前に取り除く要素の CSS セレクタ。",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "template": {
+          "description": "取り出した値を埋め込むテンプレート。`{{value}}` が値に置き換わる。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "Extract": {
+      "oneOf": [
+        {
+          "description": "要素の文字列。",
+          "type": "string",
+          "const": "text"
+        },
+        {
+          "description": "要素の中身の HTML。",
+          "type": "string",
+          "const": "html"
+        },
+        {
+          "description": "要素自身を含む HTML。",
+          "type": "string",
+          "const": "outer_html"
+        }
+      ]
+    },
+    "DetailSpec": {
+      "description": "詳細ページの読み方。",
+      "oneOf": [
+        {
+          "description": "HTML のページ。項目は CSS セレクタで取る。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "html"
+            },
+            "request": {
+              "description": "詳細ページのリクエスト。URL には `{{item.id}}` `{{item.url}}` `{{item.title}}` と、\nJSON の一覧なら `{{/pointer}}` が使える。省略時は記事の URL。",
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RequestSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "fields": {
+              "description": "詳細ページから取る値。一覧で取れた値より優先する。",
+              "$ref": "#/$defs/HtmlFields"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "JSON。項目は JSON Pointer で取る。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "json"
+            },
+            "request": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RequestSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "fields": {
+              "$ref": "#/$defs/JsonFields"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "description": "HTML 要素に埋め込まれた JSON。",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "html_json"
+            },
+            "request": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RequestSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "selector": {
+              "description": "JSON を持つ要素の CSS セレクタ。",
+              "type": "string"
+            },
+            "attr": {
+              "description": "JSON を持つ属性。省略時は要素の本文。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "item": {
+              "description": "記事の値を指す JSON Pointer。空文字はルート。",
+              "type": "string"
+            },
+            "fields": {
+              "$ref": "#/$defs/JsonFields"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "selector"
+          ]
+        }
+      ]
+    },
+    "BodySpec": {
+      "description": "本文の整え方。\n\n順に「テキストなら HTML の特殊文字を逃がす → 正規表現の置換 → 記事の画像を先頭に入れる →\n要素の除去 → 安全なタグ・属性・URL だけを残す (常に行う) → 余分な空要素と改行を整理する」。",
+      "type": "object",
+      "properties": {
+        "format": {
+          "$ref": "#/$defs/BodyFormat"
+        },
+        "newlines_to_br": {
+          "description": "文字列中の改行を `<br>` にする。表と `<pre>` の中は除く。",
+          "type": "boolean"
+        },
+        "replace": {
+          "description": "正規表現の置換。`with` の `$1` でキャプチャを参照できる。",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReplaceRule"
+          }
+        },
+        "remove": {
+          "description": "本文から取り除く要素の CSS セレクタ。",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "base_url": {
+          "description": "相対 URL の基準。省略時は本文を取得した URL。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "image_in_body": {
+          "description": "記事の画像 (`image`) を本文の先頭に入れる。",
+          "type": "boolean"
+        },
+        "tidy": {
+          "description": "空の要素と連続した改行を整理する。安全のためのタグの除去は、この設定によらず行う。",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "BodyFormat": {
+      "oneOf": [
+        {
+          "description": "HTML として扱う。",
+          "type": "string",
+          "const": "html"
+        },
+        {
+          "description": "プレーンテキストとして扱う。HTML の特殊文字を逃がし、改行を `<br>` にする。",
+          "type": "string",
+          "const": "text"
+        }
+      ]
+    },
+    "ReplaceRule": {
+      "type": "object",
+      "properties": {
+        "pattern": {
+          "description": "正規表現。",
+          "type": "string"
+        },
+        "with": {
+          "description": "置換後の文字列。`$1` でキャプチャを参照できる。",
+          "type": "string",
+          "default": ""
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "pattern"
+      ]
+    },
+    "UrlIdentity": {
+      "description": "URL の同一性。\n\n署名付きの URL (`?s=署名&t=期限`) のように、同じ画像でも取得のたびに問い合わせが変わる配信元がある。\nここで宣言した画像は、記事を比べるとき・画像キャッシュの鍵を決めるときに問い合わせの違いを見ない。\n取りに行くときは、配信元の URL (署名付き) をそのまま使う (外すと取れない配信元があるため)。",
+      "type": "object",
+      "properties": {
+        "images": {
+          "description": "画像 (一覧・詳細の `image` と本文の `<img>`) の決まり。記事の URL やリンクには使わない。",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UrlIdentityRule"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "UrlIdentityRule": {
+      "description": "同じとみなす URL の決まり。`origin` と `path_prefix` に合う URL は、`ignore_query` の\n問い合わせとフラグメントが違っても同じものとして扱う。ほかの問い合わせは見分けに使う。",
+      "type": "object",
+      "properties": {
+        "origin": {
+          "description": "スキームとホスト (と既定でないポート)。`https://cdn.example.com` のように書く。",
+          "type": "string"
+        },
+        "path_prefix": {
+          "description": "パスの先頭 (`/img/` など)。`/` で始める。省略時はオリジンのすべてのパス。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ignore_query": {
+          "description": "違っても同じとみなす問い合わせの名前 (`s`・`t` など)。大文字と小文字は区別する。",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "origin",
+        "ignore_query"
+      ]
+    }
+  }
+}

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="176 176 672 672" width="672" height="672">
+  <!--
+    macOS のメニューバーのアイコン (テンプレート画像) の元の絵。黒と透明だけで描き、色は macOS が付ける。
+    アプリのアイコンと同じ記事のカードから、見出し・コントローラー・本文を抜く。書き出しは `mise run icons`。
+  -->
+  <defs>
+    <mask id="cut" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+      <rect width="1024" height="1024" fill="#FFFFFF"/>
+      <rect x="260" y="258" width="420" height="64" rx="32" fill="#000000"/>
+      <g transform="translate(512 471) scale(1.12)">
+        <path fill="#000000" d="M-82 -104 H82 C126 -104 152 -76 162 -34 L176 62 C184 110 158 140 126 130 C104 123 90 106 76 86 L62 62 H-62 L-76 86 C-90 106 -104 123 -126 130 C-158 140 -184 110 -176 62 L-162 -34 C-152 -76 -126 -104 -82 -104 Z"/>
+        <rect x="-145" y="-34" width="98" height="38" rx="10" fill="#FFFFFF"/>
+        <rect x="-115" y="-64" width="38" height="98" rx="10" fill="#FFFFFF"/>
+        <circle cx="96" cy="-47" r="19" fill="#FFFFFF"/>
+        <circle cx="129" cy="-15" r="19" fill="#FFFFFF"/>
+        <circle cx="96" cy="17" r="19" fill="#FFFFFF"/>
+        <circle cx="63" cy="-15" r="19" fill="#FFFFFF"/>
+      </g>
+      <rect x="260" y="680" width="504" height="64" rx="32" fill="#000000"/>
+    </mask>
+  </defs>
+  <rect x="196" y="196" width="632" height="632" rx="96" fill="#000000" mask="url(#cut)"/>
+</svg>

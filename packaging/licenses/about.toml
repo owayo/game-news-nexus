@@ -1,0 +1,397 @@
+# cargo-about の設定。mise run licenses (tools/licenses の gnn-licenses) が、配布物の実行ファイルに組み込む
+# Rust のクレートのライセンスの一覧 (crates/gnn-app/assets/licenses/THIRD_PARTY_LICENSES.md) を、
+# ひな形 about.hbs から作る。補正 (clarify) で拾えないものの扱いは allowlist.toml。
+
+# 使ってよいライセンス。ここにないライセンスのクレートが入ると、一覧を作れずに止まる (CI も止まる)。
+# 足すときは、配布物で守る条件 (表示・ソースの入手先など) を確かめてから。
+# 複数から選べるクレートは、先に書いたものを選ぶ。MIT を最優先にし (ほとんどのクレートが選べ、著作権表示が
+# そのまま載る)、ほかは条件の軽い順に並べる。Apache-2.0 (NOTICE の扱いが要る) と MPL-2.0 (ソースの入手先を
+# 知らせる) は後ろに置く。特定のクレートにだけ許すものは、そのクレートの accepted に書く。
+accepted = [
+    "MIT",
+    "0BSD",
+    "CC0-1.0",
+    "BSL-1.0",
+    "ISC",
+    "Zlib",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "Apache-2.0",
+    "MPL-2.0",
+]
+
+# 配る実行ファイルのターゲット (Windows x64 と macOS Apple Silicon)。ほかの OS だけの依存は外す
+targets = ["x86_64-pc-windows-msvc", "aarch64-apple-darwin"]
+# ビルドのときだけ使う依存と、テストの依存は実行ファイルに入らない
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+# 自分のクレート (publish = false) はアプリ本体 (LICENSE) なので外す。第三者のクレートが外れていないかは
+# gnn-licenses が確かめる
+private = { ignore = true }
+# 本文はクレートの直下のファイルから探す。下の階層まで探すと、ライセンスの文を頭に書いたソースファイルが
+# 丸ごと本文として入る。下の階層のライセンスのファイル (内包したコードのものなど) は、下の clarify で入れるか、
+# 入れない理由を allowlist.toml に書く (gnn-licenses が確かめる)
+max-depth = 1
+
+# ---- clarify ----------------------------------------------------------------------------------
+# パッケージの本文を cargo-about が拾えない、またはパッケージに本文がないクレートの、本文のファイルと
+# SHA-256。files はパッケージの中、git は公開時のコミット (.cargo_vcs_info.json) のリポジトリの中のパス。
+# start・end を書くと、その区間だけを本文にする。clarify の license はクレートの Cargo.toml の式の代わりに
+# 使われる (gnn-licenses が、選んだライセンスが元の式を満たすかを確かめる)。
+# クレートを上げてファイルが変わると、cargo-about が警告を出して gnn-licenses が止まる。新しいファイルを
+# 確かめて SHA-256 を直す (cargo about clarify <パス> path <クレートのフォルダ> で計算できる)。
+
+# AccessKit のパッケージには本文がない。リポジトリの LICENSE-MIT には著作権者がなく、AUTHORS に書いてある。
+# 多くの部分は Chromium のコードに由来し、その BSD のライセンス (LICENSE.chromium) にも従う (README)
+[accesskit.clarify]
+license = "(MIT OR Apache-2.0) AND BSD-3-Clause"
+git = [
+    { path = "LICENSE-MIT", license = "MIT", checksum = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3" },
+    { path = "AUTHORS", license = "MIT", checksum = "3bab8c36f6a85657504aaefb37c7ff34e29b8c917290f3d28a1f0920c992e502" },
+    { path = "LICENSE.chromium", license = "BSD-3-Clause", checksum = "845022e0c1db1abb41a6ba4cd3c4b674ec290f3359d9d3c78ae558d4c0ed9308" },
+]
+
+[accesskit_consumer.clarify]
+license = "(MIT OR Apache-2.0) AND BSD-3-Clause"
+git = [
+    { path = "LICENSE-MIT", license = "MIT", checksum = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3" },
+    { path = "AUTHORS", license = "MIT", checksum = "3bab8c36f6a85657504aaefb37c7ff34e29b8c917290f3d28a1f0920c992e502" },
+    { path = "LICENSE.chromium", license = "BSD-3-Clause", checksum = "845022e0c1db1abb41a6ba4cd3c4b674ec290f3359d9d3c78ae558d4c0ed9308" },
+]
+
+[accesskit_macos.clarify]
+license = "(MIT OR Apache-2.0) AND BSD-3-Clause"
+git = [
+    { path = "LICENSE-MIT", license = "MIT", checksum = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3" },
+    { path = "AUTHORS", license = "MIT", checksum = "3bab8c36f6a85657504aaefb37c7ff34e29b8c917290f3d28a1f0920c992e502" },
+    { path = "LICENSE.chromium", license = "BSD-3-Clause", checksum = "845022e0c1db1abb41a6ba4cd3c4b674ec290f3359d9d3c78ae558d4c0ed9308" },
+]
+
+[accesskit_windows.clarify]
+license = "(MIT OR Apache-2.0) AND BSD-3-Clause"
+git = [
+    { path = "LICENSE-MIT", license = "MIT", checksum = "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3" },
+    { path = "AUTHORS", license = "MIT", checksum = "3bab8c36f6a85657504aaefb37c7ff34e29b8c917290f3d28a1f0920c992e502" },
+    { path = "LICENSE.chromium", license = "BSD-3-Clause", checksum = "845022e0c1db1abb41a6ba4cd3c4b674ec290f3359d9d3c78ae558d4c0ed9308" },
+]
+
+# パッケージに本文がない
+[alloc-stdlib.clarify]
+license = "BSD-3-Clause"
+git = [
+    { path = "LICENSE", license = "BSD-3-Clause", checksum = "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae" },
+]
+
+# 部品ごとの著作権表示 (先頭から) と、ライセンスごとの本文 (後ろの Full License Texts) を 1 つのファイルにまとめて
+# いて、確信度が足りずに拾えない。著作権表示は ISC の項に 1 回だけ載せ、本文はそれぞれの項に載せる。
+# テストとビルドだけに使う部品の節 (Third-Party Libraries (NOT compiled ...)) は載せない
+[aws-lc-sys.clarify]
+license = "ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)"
+files = [
+    { path = "LICENSE", license = "ISC", start = "AWS Libcrypto (AWS-LC)", end = "Code from sources and by authors listed in comments on top of the respective files.", checksum = "011f012c46e9bb03bf4f20788464fbb737dce89499fae86a53709359c796fbe8" },
+    { path = "LICENSE", license = "Apache-2.0", start = "Apache License 2.0\n------------------", end = "limitations under the License.", checksum = "13d5507b6f3b14c5efb81607e6ab274c14fc84bc856d213d63af16dec06336f0" },
+    { path = "LICENSE", license = "ISC", start = "ISC License\n-----------", end = "PERFORMANCE OF THIS SOFTWARE.", checksum = "44dec10b6577f5726bd40eebd9aec6ce18e09c58df7d233dc493f32a98f73f3a" },
+    { path = "LICENSE", license = "MIT", start = "MIT License\n-----------", end = "SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.", checksum = "f950f2ead1474b17ec594a32d1483cb39e8fe84f4a3b791727b558f318dae339" },
+    { path = "LICENSE", license = "BSD-3-Clause", start = "BSD 3-Clause License\n--------------------", end = "EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.", checksum = "636ab24d0ebae802ea87599d6ea0aa9466fff495c5be10be483860abba2f98c7" },
+]
+
+# Apache-2.0 と ISC の本文を 1 つのファイルにまとめていて拾えない
+[aws-lc-rs.clarify]
+license = "ISC AND (Apache-2.0 OR ISC)"
+files = [
+    { path = "LICENSE", license = "ISC AND (Apache-2.0 OR ISC)", checksum = "b50b376e7d24a0598488b730c3034ffcd0b58dd36c0913a24b9903a3cfd04bf7" },
+]
+
+# パッケージにあるのは BSD-3-Clause の本文だけなので、MIT ではなく BSD-3-Clause を選ぶ
+[brotli-decompressor.clarify]
+license = "BSD-3-Clause"
+files = [
+    { path = "LICENSE", license = "BSD-3-Clause", checksum = "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae" },
+]
+
+# 著作権表示と MIT・Apache-2.0 の本文を 1 つのファイルにまとめていて拾えない (cargo-about の組み込みの
+# workaround は古い版の SHA-256 で当たらない)
+[chrono.clarify]
+license = "MIT OR Apache-2.0"
+files = [
+    { path = "LICENSE.txt", license = "MIT OR Apache-2.0", checksum = "946c9835d8034d24404f8cfec5f4654cee5dad17e944afc3d06d742cf2882831" },
+]
+
+# 著作権表示と MIT・Apache-2.0 の本文を 1 つのファイルにまとめていて拾えない
+[chrono-tz.clarify]
+license = "MIT OR Apache-2.0"
+files = [
+    { path = "LICENSE", license = "MIT OR Apache-2.0", checksum = "4789210f4df8abc03fce1cddd9c2ba517f184840687f2815d741de282c1aa93a" },
+]
+
+# libm から写したコードの MIT の本文 (LICENSE-LIBM-MIT) に前書きがあって拾えない
+[dpi.clarify]
+license = "Apache-2.0 AND MIT"
+files = [
+    { path = "LICENSE", license = "Apache-2.0", checksum = "6dc0e068dcf3a5bc8e054205b85b7720e1d49265bbc64bf515d2cf79197df69a" },
+    { path = "LICENSE-LIBM-MIT", license = "MIT", checksum = "9eff396a99bafd208e7126602420d6864f6066c08b84485a5b032320a9c01997" },
+]
+
+# OpenEXR と exrs の 2 つの BSD-3-Clause を 1 つのファイルにまとめていて拾えない
+[exr.clarify]
+license = "BSD-3-Clause"
+files = [
+    { path = "LICENSE.md", license = "BSD-3-Clause", checksum = "97e4d3aa7a9e8ac31979c16ca8bb2b628a9cb72c3362185ad2bf4ad77f43551f" },
+]
+
+# LICENSE は受け継いだライセンスの表示で、本文は隠しフォルダ (.licenses) にある。表示はすべて添えることを求める。
+# 一覧には選んだ MIT の本文が載る (Apache-2.0 の本文は、Apache-2.0 を選んだときのために書いておく)
+[granit-parser.clarify]
+license = "MIT OR Apache-2.0"
+files = [
+    { path = "LICENSE", license = "MIT OR Apache-2.0", checksum = "1af262e6647807eecaec988ecf2b783fb8fdbdecba396d582c1aab90615f6845" },
+    { path = ".licenses/ChenYuheng-MIT", license = "MIT", checksum = "70480dc70c2fe1d9bbb64dab9a0abce266332905ffef9cabeae26dd027716ecb" },
+    { path = ".licenses/Ethiraric-MIT", license = "MIT", checksum = "90f4ea53f408858ba4886f57b8e3ceac876eefbb59c20f0844f0abbfa59e2749" },
+    { path = ".licenses/ChenYuheng-Apache", license = "Apache-2.0", checksum = "b2174e5bfaba26c7a78172221e190e57897b643ee21ed8ce582cf72c9b381589" },
+    { path = ".licenses/Ethiraric-Apache", license = "Apache-2.0", checksum = "e0f2efbe68fb02db5485f2bef61d8b49e788def182d3262af2df50e87c0d19f8" },
+]
+
+# パッケージに本文がない
+[gpui-kit.clarify]
+license = "Apache-2.0"
+git = [
+    { path = "LICENSE-APACHE", license = "Apache-2.0", checksum = "d1b0449e5478c574ba4f686c2656df7fe77d66821a61f8b6ed3378a58ed9a811" },
+]
+
+# パッケージに本文がない。画面のアイコン (Lucide は ISC、Feather に由来するものは MIT) を含み、その表示が
+# LICENSE-LUCIDE にある (Cargo.toml の式は Apache-2.0 だけ)
+[gpui-kit-assets.clarify]
+license = "Apache-2.0 AND ISC AND MIT"
+files = [
+    { path = "LICENSE-LUCIDE", license = "ISC AND MIT", checksum = "b495047bd93a9b06913511076f504daba17d5bbeb3e0650f3bb53a4220329c57" },
+]
+git = [
+    { path = "LICENSE-APACHE", license = "Apache-2.0", checksum = "d1b0449e5478c574ba4f686c2656df7fe77d66821a61f8b6ed3378a58ed9a811" },
+]
+
+# 文分割の組み込みの例外表 (IPAdic・NEologd・SudachiDict (UniDic を含む) の表層形から作ったもの) を
+# ライブラリに埋め込む。その表示が src/sentence/builtin_exceptions.NOTICE にあり、配布物の一覧に写して使う
+# 前提で書かれている。NOTICE は NAIST-2003 の項に 1 回載せ、UniDic の BSD-3-Clause の本文は BSD-3-Clause の
+# 項にも載せる。hasami を上げてファイルが変わったら、ここの SHA-256 も直す
+[hasami]
+accepted = ["NAIST-2003"]
+
+[hasami.clarify]
+license = "MIT AND NAIST-2003 AND Apache-2.0 AND BSD-3-Clause"
+files = [
+    { path = "LICENSE", license = "MIT", checksum = "420ab593d0a971f77393ca2f63d7376c12680d344789cbd045e43501c2b92724" },
+    { path = "LICENSE-APACHE-2.0", license = "Apache-2.0", checksum = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30" },
+    { path = "src/sentence/builtin_exceptions.NOTICE", license = "NAIST-2003", checksum = "60f0e15cd1542f2784795a12d14426fa0212fd8b8d9eee384893824d84a22add" },
+    { path = "src/sentence/builtin_exceptions.NOTICE", license = "BSD-3-Clause", start = "Copyright (c) 2011-2013, The UniDic Consortium", end = "OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.", checksum = "a21c425d9c7c28bd5927ea992ec4f804f39c7782427fb83b65bdb6453cd97be8" },
+]
+
+# musl などの著作権表示を MIT の本文の後ろに並べていて拾えない
+[libm.clarify]
+license = "MIT"
+files = [
+    { path = "LICENSE.txt", license = "MIT", checksum = "3823dda7cf046602f4b4e77ec8e227863dc4736037cc85bb33d9f19febe16bb7" },
+]
+
+# パッケージに本文がない
+[lyon.clarify]
+license = "MIT OR Apache-2.0"
+git = [
+    { path = "LICENSE-MIT", license = "MIT", checksum = "80f275e90d799911ed3830a7f242a2ef5a4ade2092fe0aa07bfb2d2cf2f2b95e" },
+]
+
+[lyon_algorithms.clarify]
+license = "MIT OR Apache-2.0"
+git = [
+    { path = "LICENSE-MIT", license = "MIT", checksum = "80f275e90d799911ed3830a7f242a2ef5a4ade2092fe0aa07bfb2d2cf2f2b95e" },
+]
+
+[lyon_geom.clarify]
+license = "MIT OR Apache-2.0"
+git = [
+    { path = "LICENSE-MIT", license = "MIT", checksum = "80f275e90d799911ed3830a7f242a2ef5a4ade2092fe0aa07bfb2d2cf2f2b95e" },
+]
+
+[lyon_path.clarify]
+license = "MIT OR Apache-2.0"
+git = [
+    { path = "LICENSE-MIT", license = "MIT", checksum = "80f275e90d799911ed3830a7f242a2ef5a4ade2092fe0aa07bfb2d2cf2f2b95e" },
+]
+
+[lyon_tessellation.clarify]
+license = "MIT OR Apache-2.0"
+git = [
+    { path = "LICENSE-MIT", license = "MIT", checksum = "80f275e90d799911ed3830a7f242a2ef5a4ade2092fe0aa07bfb2d2cf2f2b95e" },
+]
+
+# objc2 から分かれたクレート。パッケージに本文がなく、リポジトリの LICENSE.txt にある
+[objc-sys.clarify]
+license = "MIT"
+git = [
+    { path = "LICENSE.txt", license = "MIT", checksum = "e353f37b12aefbb9f9b29490e837cfee05d9bda70804b3562839a3285c1df1e5" },
+]
+
+# MPL-2.0 の本文に少し違いがあって拾えない
+[option-ext.clarify]
+license = "MPL-2.0"
+files = [
+    { path = "LICENSE.txt", license = "MPL-2.0", checksum = "66a3107d5ad6a058aab753eaac2047ccb2ed0e39465dd0fe5844da3e300d5172" },
+]
+
+# パッケージに本文がない。0.5.1 の公開時のコミット (a5e98fac00f4) が servo/pathfinder にないので、
+# pathfinder_simd 0.5.6 の公開時のコミットの、同じリポジトリ直下の LICENSE-MIT を使う
+[pathfinder_geometry.clarify]
+license = "MIT OR Apache-2.0"
+override-git-commit = "6c3c0466f451c5bd2007087728cd168798cd64e8"
+git = [
+    { path = "LICENSE-MIT", license = "MIT", checksum = "0621878e61f0d0fda054bcbe02df75192c28bde1ecc8289cbd86aeba2dd72720" },
+]
+
+[pathfinder_simd.clarify]
+license = "MIT OR Apache-2.0"
+git = [
+    { path = "LICENSE-MIT", license = "MIT", checksum = "0621878e61f0d0fda054bcbe02df75192c28bde1ecc8289cbd86aeba2dd72720" },
+]
+
+# パッケージに本文がない
+[profiling.clarify]
+license = "MIT OR Apache-2.0"
+git = [
+    { path = "LICENSE-MIT", license = "MIT", checksum = "c8167fdeeed46d3f244d3f85c5bf998ce889343691c32be2c61a8bc4b5c08333" },
+]
+
+[profiling-procmacros.clarify]
+license = "MIT OR Apache-2.0"
+git = [
+    { path = "LICENSE-MIT", license = "MIT", checksum = "c8167fdeeed46d3f244d3f85c5bf998ce889343691c32be2c61a8bc4b5c08333" },
+]
+
+# パッケージに本文がない
+[pulp-wasm-simd-flag.clarify]
+license = "MIT"
+git = [
+    { path = "LICENSE", license = "MIT", checksum = "d64f878c89bd5f1e5ada7e4aad57690b122727cf5229b7b87ea1980c188da1d9" },
+]
+
+# Unicode のデータから作った表 (src/unicode_tables) を含み、その表示が LICENSE-UNICODE にある
+# (Cargo.toml の式は MIT OR Apache-2.0 だけ)
+[regex-syntax]
+accepted = ["Unicode-DFS-2016"]
+
+[regex-syntax.clarify]
+license = "(MIT OR Apache-2.0) AND Unicode-DFS-2016"
+files = [
+    { path = "LICENSE-MIT", license = "MIT", checksum = "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb" },
+    { path = "src/unicode_tables/LICENSE-UNICODE", license = "Unicode-DFS-2016", checksum = "74db5baf44a41b1000312c673544b3374e4198af5605c7f9080a402cec42cfa3" },
+]
+
+# パッケージに本文がない
+[rust-i18n-macro.clarify]
+license = "MIT"
+git = [
+    { path = "LICENSE", license = "MIT", checksum = "d6fde6c28ecbccfc7f6d97c0badbb14bbea2cc8f5e81a8c1537204bdfed9a6d5" },
+]
+
+[rust-i18n-support.clarify]
+license = "MIT"
+git = [
+    { path = "LICENSE", license = "MIT", checksum = "d6fde6c28ecbccfc7f6d97c0badbb14bbea2cc8f5e81a8c1537204bdfed9a6d5" },
+]
+
+# 本文の著作権者が「AUTHORS のとおり」で、その AUTHORS も添える
+[sha1_smol.clarify]
+license = "BSD-3-Clause"
+files = [
+    { path = "LICENSE", license = "BSD-3-Clause", checksum = "282a21b0710441c364025461a447362daf18f5798a7b72ae2f801a2aa536da51" },
+    { path = "AUTHORS", license = "BSD-3-Clause", checksum = "613ce6df827bdbab4f498700a141548396b6ff26488f263654159ada4b04f78e" },
+]
+
+# パッケージに本文がない
+[svg_fmt.clarify]
+license = "MIT OR Apache-2.0"
+git = [
+    { path = "LICENSE", license = "MIT", checksum = "7e98bed7f100747aaae7d82ab94fbe6b76fd6b84b09a3aaa413bff8196d0fbb1" },
+]
+
+# Apache-2.0 の本文の前に空行があって拾えない
+[sync_wrapper.clarify]
+license = "Apache-2.0"
+files = [
+    { path = "LICENSE", license = "Apache-2.0", checksum = "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594" },
+]
+
+# パッケージに本文がない
+[taffy.clarify]
+license = "MIT"
+git = [
+    { path = "LICENSE", license = "MIT", checksum = "f97daf1a0124413dccf399a4e6626b4b74acd05282f80b6d64ac82225650b77a" },
+]
+
+# 内包した spin のコード (src/spin) の MIT の本文が下の階層にある
+[tracing-core.clarify]
+license = "MIT"
+files = [
+    { path = "LICENSE", license = "MIT", checksum = "898b1ae9821e98daf8964c8d6c7f61641f5f5aa78ad500020771c0939ee0dea1" },
+    { path = "src/spin/LICENSE", license = "MIT", checksum = "58545fed1565e42d687aecec6897d35c6d37ccb71479a137c0deb2203e125c79" },
+]
+
+# windows-rs のクレートは本文のファイル名が小文字 (license-mit) で、cargo-about の走査の対象にならない
+[windows.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+[windows-collections.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+[windows-core.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+[windows-future.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+[windows-implement.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+[windows-interface.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+[windows-link.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+[windows-numerics.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+[windows-registry.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+[windows-result.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+[windows-strings.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+[windows-sys.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+[windows-targets.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+[windows-threading.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
+
+[windows_x86_64_msvc.clarify]
+license = "MIT OR Apache-2.0"
+files = [{ path = "license-mit", license = "MIT", checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383" }]
