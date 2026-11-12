@@ -449,32 +449,16 @@ impl Services {
         };
 
         // 購読: なければ旧形式から移すか、既定のグループを on にする。
-        let mut notes = StartupNotes::default();
-        let mut subscriptions = match config.load_subscriptions()? {
-            Some(subscriptions) => subscriptions,
-            None => {
-                notes.migrated = config.migrate_legacy_sources(&catalog, &settings)?;
-                match config.load_subscriptions()? {
-                    Some(subscriptions) => subscriptions,
-                    None => {
-                        let defaults = catalog.default_subscriptions();
-                        config.save_subscriptions(&defaults)?;
-                        defaults
-                    }
-                }
-            }
+        let setup = config.initialize_subscriptions(&catalog, &settings)?;
+        let notes = StartupNotes {
+            migrated: setup.migrated,
         };
-        // 前の起動 (や旧形式) のあとでカタログに加わったソースを、既定どおりに足す。
-        let before = subscriptions.items.len();
-        let adopted = catalog.adopt_new_entries(&mut subscriptions);
-        if subscriptions.items.len() != before {
-            config.save_subscriptions(&subscriptions)?;
-            if !adopted.is_empty() {
-                tracing::info!(
-                    "カタログに加わったソースを on にしました: {}",
-                    adopted.join(", ")
-                );
-            }
+        let subscriptions = setup.subscriptions;
+        if !setup.adopted.is_empty() {
+            tracing::info!(
+                "カタログに加わったソースを on にしました: {}",
+                setup.adopted.join(", ")
+            );
         }
         let local = config.load_local_sources()?;
         for file in &local {
@@ -676,10 +660,7 @@ impl Services {
     pub fn update_subscriptions(&self, f: impl FnOnce(&mut Subscriptions)) -> Result<()> {
         {
             let mut shared = self.0.shared.write();
-            let mut subscriptions = shared.subscriptions.clone();
-            f(&mut subscriptions);
-            self.0.config.save_subscriptions(&subscriptions)?;
-            shared.subscriptions = subscriptions;
+            shared.subscriptions = self.0.config.update_subscriptions(f)?;
             shared.resolve();
         }
         self.sources_changed();
@@ -694,10 +675,10 @@ impl Services {
             let mut shared = self.0.shared.write();
             shared.local = local;
             if enable {
-                let mut subscriptions = shared.subscriptions.clone();
-                subscriptions.set_enabled(id, true);
-                self.0.config.save_subscriptions(&subscriptions)?;
-                shared.subscriptions = subscriptions;
+                shared.subscriptions = self
+                    .0
+                    .config
+                    .update_subscriptions(|subscriptions| subscriptions.set_enabled(id, true))?;
             }
             shared.resolve();
         }
@@ -714,10 +695,10 @@ impl Services {
             let mut shared = self.0.shared.write();
             shared.local = local;
             if shared.catalog.get(id).is_none() {
-                let mut subscriptions = shared.subscriptions.clone();
-                subscriptions.remove(id);
-                self.0.config.save_subscriptions(&subscriptions)?;
-                shared.subscriptions = subscriptions;
+                shared.subscriptions = self
+                    .0
+                    .config
+                    .update_subscriptions(|subscriptions| subscriptions.remove(id))?;
             }
             shared.resolve();
         }
@@ -831,14 +812,12 @@ impl Services {
                     });
                     let mut shared = self.0.shared.write();
                     // カタログに加わったソースを、既定どおりに購読に足す。
-                    let mut subscriptions = shared.subscriptions.clone();
-                    let before = subscriptions.items.len();
-                    let adopted = catalog.adopt_new_entries(&mut subscriptions);
+                    let mut adopted = Vec::new();
                     let saved = saved.and_then(|()| {
-                        if subscriptions.items.len() != before {
-                            self.0.config.save_subscriptions(&subscriptions)?;
-                            shared.subscriptions = subscriptions;
-                        }
+                        shared.subscriptions =
+                            self.0.config.update_subscriptions(|subscriptions| {
+                                adopted = catalog.adopt_new_entries(subscriptions);
+                            })?;
                         Ok(())
                     });
                     if !adopted.is_empty() {
@@ -2882,6 +2861,40 @@ mod tests {
         let (services, _) =
             Services::start(AppPaths::under(dir.path().to_path_buf()), sender).unwrap();
         (dir, services, receiver)
+    }
+
+    #[test]
+    fn services_keep_subscription_changes_from_another_instance() {
+        let (_dir, first, _events) = start_services();
+        let paths = first.paths().clone();
+        let (sender, _receiver) = flume::unbounded();
+        let (second, _) = Services::start(paths.clone(), sender).unwrap();
+
+        first
+            .update_subscriptions(|subscriptions| {
+                let item = subscriptions.entry("genshin_impact");
+                item.enabled = false;
+                item.interval_minutes = Some(37);
+                item.icon = Some("custom.png".into());
+            })
+            .unwrap();
+        second
+            .update_subscriptions(|subscriptions| {
+                subscriptions.set_enabled("honkai_star_rail", false);
+            })
+            .unwrap();
+        let saved = ConfigStore::new(paths)
+            .load_subscriptions()
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved, second.subscriptions());
+        let item = saved.get("genshin_impact").unwrap();
+        assert!(!item.enabled);
+        assert_eq!(item.interval_minutes, Some(37));
+        assert_eq!(item.icon.as_deref(), Some("custom.png"));
+        assert!(!saved.get("honkai_star_rail").unwrap().enabled);
+        first.shutdown(SHUTDOWN_TIMEOUT);
+        second.shutdown(SHUTDOWN_TIMEOUT);
     }
 
     fn news_source(services: &Services) -> ResolvedSource {

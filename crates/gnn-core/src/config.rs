@@ -311,6 +311,14 @@ pub struct ConfigStore {
     paths: AppPaths,
 }
 
+/// 起動時に読み込んだ購読と、移行・カタログ追加の結果。
+#[derive(Debug)]
+pub struct SubscriptionSetup {
+    pub subscriptions: Subscriptions,
+    pub migrated: Option<LegacyMigration>,
+    pub adopted: Vec<String>,
+}
+
 impl ConfigStore {
     pub fn new(paths: AppPaths) -> Self {
         Self { paths }
@@ -330,15 +338,90 @@ impl ConfigStore {
 
     /// 購読を読む。ファイルがなければ `None` (初めての起動)。
     pub fn load_subscriptions(&self) -> Result<Option<Subscriptions>> {
+        let _lock = self.lock_subscriptions()?;
         load_toml(&self.paths.subscriptions_file())
     }
 
     pub fn save_subscriptions(&self, subscriptions: &Subscriptions) -> Result<()> {
+        let _lock = self.lock_subscriptions()?;
+        self.write_subscriptions(subscriptions)
+    }
+
+    /// 最新の保存内容を読み直して変更する。別プロセスの変更を古い控えで上書きしない。
+    pub fn update_subscriptions(
+        &self,
+        update: impl FnOnce(&mut Subscriptions),
+    ) -> Result<Subscriptions> {
+        let _lock = self.lock_subscriptions()?;
+        let mut subscriptions: Subscriptions =
+            load_toml(&self.paths.subscriptions_file())?.context("購読が初期化されていません")?;
+        let before = subscriptions.clone();
+        update(&mut subscriptions);
+        if subscriptions != before {
+            self.write_subscriptions(&subscriptions)?;
+        }
+        Ok(subscriptions)
+    }
+
+    fn write_subscriptions(&self, subscriptions: &Subscriptions) -> Result<()> {
         write_toml(
             &self.paths.subscriptions_file(),
             subscriptions,
             SUBSCRIPTIONS_HEADER,
         )
+    }
+
+    /// 購読がなければ移行または初期化し、新しいカタログ項目を補う。読み取りから保存まで同じロックで守る。
+    pub fn initialize_subscriptions(
+        &self,
+        catalog: &Catalog,
+        settings: &AppSettings,
+    ) -> Result<SubscriptionSetup> {
+        let _lock = self.lock_subscriptions()?;
+        let mut migrated = None;
+        let mut created = false;
+        let mut subscriptions = match load_toml(&self.paths.subscriptions_file())? {
+            Some(subscriptions) => subscriptions,
+            None => {
+                migrated = self.migrate_legacy_sources_locked(catalog, settings)?;
+                match load_toml(&self.paths.subscriptions_file())? {
+                    Some(subscriptions) => subscriptions,
+                    None => {
+                        created = true;
+                        catalog.default_subscriptions()
+                    }
+                }
+            }
+        };
+        let before = subscriptions.items.len();
+        let adopted = catalog.adopt_new_entries(&mut subscriptions);
+        if created || subscriptions.items.len() != before {
+            self.write_subscriptions(&subscriptions)?;
+        }
+        Ok(SubscriptionSetup {
+            subscriptions,
+            migrated,
+            adopted,
+        })
+    }
+
+    /// 置き換えない別ファイルで、スレッド・プロセスをまたいで購読の読み書きを排他する。
+    /// ロック中は待ち続けず誤りを返す。ファイルは消さず、ハンドルを閉じると OS がロックを外す。
+    fn lock_subscriptions(&self) -> Result<File> {
+        let dir = self.paths.config_dir();
+        fs::create_dir_all(dir).with_context(|| format!("{} を作成できません", dir.display()))?;
+        let path = dir.join("subscriptions.lock");
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("{} を開けません", path.display()))?;
+        file.try_lock().context(
+            "購読をロックできません。ほかの処理が使用中なら、少し待ってからやり直してください",
+        )?;
+        Ok(file)
     }
 
     pub fn load_secrets(&self) -> Result<Secrets> {
@@ -451,6 +534,15 @@ impl ConfigStore {
         catalog: &Catalog,
         settings: &AppSettings,
     ) -> Result<Option<LegacyMigration>> {
+        let _lock = self.lock_subscriptions()?;
+        self.migrate_legacy_sources_locked(catalog, settings)
+    }
+
+    fn migrate_legacy_sources_locked(
+        &self,
+        catalog: &Catalog,
+        settings: &AppSettings,
+    ) -> Result<Option<LegacyMigration>> {
         let legacy = self.paths.legacy_sources_file();
         if !legacy.exists() || self.paths.subscriptions_file().exists() {
             return Ok(None);
@@ -518,7 +610,7 @@ impl ConfigStore {
             write_atomic(&self.paths.local_source_file(&id), text.as_bytes())?;
             local_sources.push(id);
         }
-        self.save_subscriptions(&subscriptions)?;
+        self.write_subscriptions(&subscriptions)?;
 
         let mut backup = legacy.with_extension("toml.bak");
         if backup.exists() {
@@ -733,6 +825,261 @@ mod tests {
         let store = ConfigStore::new(AppPaths::under(dir.path().to_path_buf()));
         store.paths().ensure().unwrap();
         (dir, store)
+    }
+
+    /// 親の書き込み中に別プロセスで購読へ触れる。通常のテスト実行では何もしない。
+    #[test]
+    fn subscriptions_process_lock_probe() {
+        let Some(home) = std::env::var_os("GNN_TEST_SUBSCRIPTIONS_HOME") else {
+            return;
+        };
+        let store = ConfigStore::new(AppPaths::under(home.into()));
+        assert!(
+            store
+                .initialize_subscriptions(&Catalog::bundled(), &AppSettings::default())
+                .is_err()
+        );
+        assert!(store.load_subscriptions().is_err());
+        assert!(store.save_subscriptions(&Subscriptions::default()).is_err());
+        assert!(
+            store
+                .update_subscriptions(|_| panic!("ロック中に変更しない"))
+                .is_err()
+        );
+        assert!(
+            store
+                .migrate_legacy_sources(&Catalog::bundled(), &AppSettings::default())
+                .is_err()
+        );
+    }
+
+    /// Windows の置き換え中に名前が一瞬消える状況を、待ち時間に頼らず再現する。
+    fn probe_during_subscription_write(paths: AppPaths, missing: bool) {
+        on_temp_created(move || {
+            let path = paths.subscriptions_file();
+            let backup = path.with_extension("test-backup");
+            if missing {
+                fs::rename(&path, &backup).unwrap();
+            }
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "config::tests::subscriptions_process_lock_probe",
+                    "--nocapture",
+                ])
+                .env(
+                    "GNN_TEST_SUBSCRIPTIONS_HOME",
+                    paths.config_dir().parent().unwrap(),
+                )
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            // ロックを待ち続ける実装に退行しても、子プロセスを残さずテストを失敗させる。
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let timed_out = loop {
+                if child.try_wait().unwrap().is_some() {
+                    break false;
+                }
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    break true;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            let output = child.wait_with_output().unwrap();
+            if missing {
+                fs::rename(backup, path).unwrap();
+            }
+            assert!(
+                !timed_out && output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        });
+    }
+
+    #[test]
+    fn subscription_replacement_cannot_be_mistaken_for_first_start() {
+        let (_dir, store) = store();
+        let catalog = Catalog::bundled();
+        let mut subscriptions = catalog.default_subscriptions();
+        let custom = subscriptions.entry("genshin_impact");
+        custom.enabled = false;
+        custom.interval_minutes = Some(37);
+        custom.icon = Some("custom.png".into());
+        store.save_subscriptions(&subscriptions).unwrap();
+
+        probe_during_subscription_write(store.paths().clone(), true);
+        store.save_subscriptions(&subscriptions).unwrap();
+        let setup = store
+            .initialize_subscriptions(&catalog, &AppSettings::default())
+            .unwrap();
+        assert_eq!(setup.subscriptions, subscriptions);
+        assert_eq!(setup.migrated, None);
+        assert!(setup.adopted.is_empty());
+        assert_eq!(store.load_subscriptions().unwrap(), Some(subscriptions));
+    }
+
+    #[test]
+    fn first_subscription_initialization_excludes_other_processes() {
+        let (_dir, store) = store();
+        let catalog = Catalog::bundled();
+        probe_during_subscription_write(store.paths().clone(), false);
+        let setup = store
+            .initialize_subscriptions(&catalog, &AppSettings::default())
+            .unwrap();
+        assert_eq!(setup.subscriptions, catalog.default_subscriptions());
+        assert_eq!(setup.migrated, None);
+        assert_eq!(
+            store.load_subscriptions().unwrap(),
+            Some(setup.subscriptions)
+        );
+    }
+
+    #[test]
+    fn invalid_subscriptions_are_not_reinitialized() {
+        let (_dir, store) = store();
+        let path = store.paths().subscriptions_file();
+        fs::write(&path, "broken = [").unwrap();
+        assert!(
+            store
+                .initialize_subscriptions(&Catalog::bundled(), &AppSettings::default())
+                .is_err()
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), "broken = [");
+    }
+
+    #[test]
+    fn subscription_updates_read_the_latest_saved_values() {
+        let (_dir, store) = store();
+        store.save_subscriptions(&Subscriptions::default()).unwrap();
+        let other = ConfigStore::new(store.paths().clone());
+        store
+            .update_subscriptions(|subscriptions| {
+                let item = subscriptions.entry("first");
+                item.enabled = false;
+                item.interval_minutes = Some(37);
+            })
+            .unwrap();
+        let updated = other
+            .update_subscriptions(|subscriptions| {
+                subscriptions.entry("second").icon = Some("custom.png".into());
+            })
+            .unwrap();
+        assert!(!updated.get("first").unwrap().enabled);
+        assert_eq!(updated.get("first").unwrap().interval_minutes, Some(37));
+        assert_eq!(
+            updated.get("second").unwrap().icon.as_deref(),
+            Some("custom.png")
+        );
+        assert_eq!(store.load_subscriptions().unwrap(), Some(updated));
+    }
+
+    #[test]
+    fn unchanged_subscriptions_are_not_rewritten() {
+        let (_dir, store) = store();
+        store.save_subscriptions(&Subscriptions::default()).unwrap();
+        let path = store.paths().subscriptions_file();
+        let modified = SystemTime::now() - Duration::from_secs(60);
+        set_modified(&path, modified);
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        store.update_subscriptions(|_| {}).unwrap();
+        assert_eq!(fs::metadata(path).unwrap().modified().unwrap(), modified);
+    }
+
+    #[test]
+    fn subscription_lock_failure_does_not_change_saved_values() {
+        let (_dir, store) = store();
+        let path = store.paths().subscriptions_file();
+        fs::write(&path, "# 購読を保持する\n").unwrap();
+        fs::create_dir(store.paths().config_dir().join("subscriptions.lock")).unwrap();
+        assert!(
+            store
+                .initialize_subscriptions(&Catalog::bundled(), &AppSettings::default())
+                .is_err()
+        );
+        assert!(store.save_subscriptions(&Subscriptions::default()).is_err());
+        assert_eq!(fs::read_to_string(path).unwrap(), "# 購読を保持する\n");
+    }
+
+    /// 同じ購読を再保存しない効果と、変更時の退行を手元の一時ディレクトリで測る。
+    #[test]
+    #[ignore = "手動の性能計測。通常のテストでは時間を評価しない"]
+    fn benchmark_subscription_updates() {
+        const ITERATIONS: usize = 100;
+        const SAMPLES: usize = 7;
+        // 変更の有無によらず保存する比較用の経路。排他・読み取り・複製は更新後とそろえる。
+        fn update(store: &ConfigStore, changed: bool, always_save: bool) -> Subscriptions {
+            let change = |subscriptions: &mut Subscriptions| {
+                if changed {
+                    subscriptions.items[0].enabled = !subscriptions.items[0].enabled;
+                }
+            };
+            if !always_save {
+                return store.update_subscriptions(change).unwrap();
+            }
+            let _lock = store.lock_subscriptions().unwrap();
+            let mut subscriptions: Subscriptions = load_toml(&store.paths.subscriptions_file())
+                .unwrap()
+                .unwrap();
+            let before = subscriptions.clone();
+            change(&mut subscriptions);
+            std::hint::black_box(subscriptions == before);
+            store.write_subscriptions(&subscriptions).unwrap();
+            subscriptions
+        }
+        let mut results = Vec::new();
+        for count in [Catalog::bundled().default_subscriptions().items.len(), 1000] {
+            for changed in [false, true] {
+                let (_dir, store) = store();
+                let subscriptions = Subscriptions {
+                    items: (0..count)
+                        .map(|index| Subscription::new(format!("source_{index}")))
+                        .collect(),
+                };
+                store.save_subscriptions(&subscriptions).unwrap();
+                let mut samples = [Vec::new(), Vec::new()];
+                // 最初の 2 回はウォームアップ。すべて同じビルド・入力・回数で測る。
+                for sample in 0..SAMPLES + 2 {
+                    let mut elapsed = [0.0, 0.0];
+                    // I/O の時間変動が片方に偏らないよう、操作ごとに順番を交互にする。
+                    for iteration in 0..ITERATIONS {
+                        let first = (sample + iteration) % 2;
+                        for index in [first, 1 - first] {
+                            let start = std::time::Instant::now();
+                            std::hint::black_box(update(&store, changed, index == 0));
+                            elapsed[index] += start.elapsed().as_secs_f64() * 1000.0;
+                        }
+                    }
+                    if sample >= 2 {
+                        for index in 0..2 {
+                            samples[index].push(elapsed[index]);
+                        }
+                    }
+                }
+                assert_eq!(store.load_subscriptions().unwrap(), Some(subscriptions));
+                results.push(serde_json::json!({
+                    "subscriptions": count,
+                    "changed": changed,
+                    "always_save_ms": samples[0],
+                    "skip_unchanged_ms": samples[1],
+                }));
+            }
+        }
+        println!(
+            "{}",
+            serde_json::json!({
+                "os": std::env::consts::OS,
+                "arch": std::env::consts::ARCH,
+                "iterations": ITERATIONS,
+                "warmup_samples": 2,
+                "samples": SAMPLES,
+                "sampling": "interleaved_per_operation",
+                "cases": results,
+            })
+        );
     }
 
     #[test]
