@@ -1,0 +1,18 @@
+# 巨乳ファンタジー バースト
+# yaml-language-server: $schema=../../schema/source.schema.json
+schema: 2
+min_app_version: '26.11.6'
+id: kyonyu_fantasy_burst
+name: 巨乳ファンタジー バースト
+tags:
+  - dmm
+lists:
+  - kind: json
+    request:
+      url: 'https://announcement-ps8.funyoursjapan.pink/prod/page-data/index/page-data.json'
+    items: '/result/data/allStrapiArticle/edges'
+    fields:
+      id: '/node/strapiId'
+      title: '/node/title'
+      published: '/node/announce'
+      body: '/node/body'

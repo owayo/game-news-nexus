@@ -1,0 +1,24 @@
+# エデンズリッター グレンツェ
+# yaml-language-server: $schema=../../schema/source.schema.json
+schema: 2
+min_app_version: '26.11.6'
+id: edens_ritter_grenze
+name: エデンズリッター グレンツェ
+tags:
+  - dmm
+max_items: 30
+lists:
+  - kind: html
+    request:
+      url: 'https://webapi-eg.funyoursjapan.pink/wp/i/'
+    items: '.ct-new-columns:nth-child(2) > .ct-div-block:nth-child(1) .oxy-dynamic-list > .ct-div-block a'
+    fields:
+      url:
+        attr: href
+detail:
+  kind: html
+  fields:
+    title: '.ct-new-columns:nth-child(2) > .ct-div-block:nth-child(2) h1'
+    published: '.ct-new-columns:nth-child(2) > .ct-div-block:nth-child(2) .ct-text-block .ct-span'
+    body:
+      selector: '.ct-new-columns:nth-child(2) > .ct-div-block:nth-child(2) > .ct-section .ct-text-block'

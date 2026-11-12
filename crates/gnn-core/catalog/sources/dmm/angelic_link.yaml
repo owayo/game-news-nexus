@@ -1,0 +1,29 @@
+# エンジェリックリンク
+# yaml-language-server: $schema=../../schema/source.schema.json
+schema: 2
+min_app_version: '26.11.6'
+id: angelic_link
+name: エンジェリックリンク
+homepage: 'https://support.angelic-link.jp/news/'
+tags:
+  - dmm
+prepare:
+  - request:
+      url: 'https://ancl.jp/game/announce/catalog/'
+    bind:
+      catalog: '/data/info'
+lists:
+  - kind: json
+    request:
+      url: 'https://ancl.jp/game/announce/data/info/{{vars.catalog}}/'
+    items: '/data'
+    fields:
+      id: '/time'
+      title: '/title'
+      published: '/time'
+      body: '/contents'
+body:
+  format: text
+  replace:
+    - pattern: '([^\r\n]+\.jpg)[\r\n]+'
+      with: '<img src="https://support.angelic-link.jp/news/$1">'

@@ -1,0 +1,24 @@
+# 魔王カリンちゃんRPG
+# yaml-language-server: $schema=../../schema/source.schema.json
+schema: 2
+min_app_version: '26.11.6'
+id: maou_karinchan_rpg
+name: 魔王カリンちゃんRPG
+tags:
+  - dmm
+max_items: 40
+lists:
+  - kind: html
+    request:
+      url: 'https://api.karinchan-rpg.com/bottom/announce/list'
+    items: ul.page-announce-list li a.i-link
+    fields:
+      url:
+        attr: href
+detail:
+  kind: html
+  fields:
+    title: '.page-announce-detail .i-title'
+    published: '.page-announce-detail .i-date'
+    body:
+      selector: '.page-announce-detail .i-text'

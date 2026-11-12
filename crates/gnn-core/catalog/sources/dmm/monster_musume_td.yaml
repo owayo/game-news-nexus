@@ -1,0 +1,20 @@
+# モンスター娘TD
+# yaml-language-server: $schema=../../schema/source.schema.json
+schema: 2
+min_app_version: '26.11.6'
+id: monster_musume_td
+name: モンスター娘TD
+tags:
+  - dmm
+lists:
+  - kind: json
+    request:
+      url: 'https://assets.game-monmusu-td.net/res/information/news/1/news.json'
+    items: '/newsList'
+    fields:
+      id: '/id'
+      title: '/title'
+      published: '/postedAt'
+      body: '/message'
+body:
+  newlines_to_br: true

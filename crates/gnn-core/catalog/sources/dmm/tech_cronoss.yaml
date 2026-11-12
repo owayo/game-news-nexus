@@ -1,0 +1,25 @@
+# テクロノス
+# yaml-language-server: $schema=../../schema/source.schema.json
+schema: 2
+min_app_version: '26.11.6'
+id: tech_cronoss
+name: テクロノス
+tags:
+  - dmm
+lists:
+  - kind: json
+    request:
+      url: 'https://contents.techcronoss.techcross.co.jp/news/index-webgl-x.json'
+    items: '/news'
+    fields:
+      id: '/path'
+      title: '/title'
+      published: '/beginAt'
+detail:
+  kind: html
+  request:
+    url: 'https://contents.techcronoss.techcross.co.jp/news/{{item.id}}.html'
+body:
+  replace:
+    - pattern: '\{\s*IMAGE_URL\s*\}'
+      with: 'https://contents.techcronoss.techcross.co.jp/news/news/images'

@@ -1,0 +1,13 @@
+# 4Gamer.net
+# yaml-language-server: $schema=../../schema/source.schema.json
+schema: 2
+min_app_version: '26.11.6'
+id: '4gamer'
+name: '4Gamer.net'
+homepage: 'https://www.4gamer.net/'
+tags:
+  - media
+lists:
+  - kind: feed
+    request:
+      url: 'https://www.4gamer.net/rss/index.xml'

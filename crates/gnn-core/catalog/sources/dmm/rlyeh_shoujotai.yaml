@@ -1,0 +1,20 @@
+# ルルイエ少女隊
+# yaml-language-server: $schema=../../schema/source.schema.json
+schema: 2
+min_app_version: '26.11.6'
+id: rlyeh_shoujotai
+name: ルルイエ少女隊
+tags:
+  - dmm
+lists:
+  - kind: json
+    request:
+      url: 'https://assets.cthulhu-rog.net/res/production/information/news/1/news.json'
+    items: '/newsList'
+    fields:
+      id: '/id'
+      title: '/title'
+      published: '/postedAt'
+      body: '/message'
+body:
+  newlines_to_br: true
