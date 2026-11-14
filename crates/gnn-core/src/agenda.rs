@@ -1186,7 +1186,6 @@ pub fn period_badge<Z: TimeZone>(
         return None;
     }
     let clock = Clock::new(now, tz);
-    let kind = period_kind_text(period.kind);
     let found = live_milestones(&period.window, now)
         .into_iter()
         .filter_map(|(milestone, range)| {
@@ -1200,7 +1199,23 @@ pub fn period_badge<Z: TimeZone>(
             Some((day, milestone, range, label))
         })
         .min_by_key(|(day, milestone, _, _)| (*day, *milestone == Milestone::End));
-    let (_, milestone, (from, to), day) = found?;
+    let (_, milestone, range, day) = found?;
+    Some(milestone_badge(
+        period, milestone, range, day, &clock, now, tz,
+    ))
+}
+
+/// 期間の節目 1 つのバッジ (「ガチャ 今日 23:59 まで」)。`day` は「今日」「明日」。
+fn milestone_badge<Z: TimeZone>(
+    period: &Period,
+    milestone: Milestone,
+    (from, to): TimeRange,
+    day: &str,
+    clock: &Clock<'_, Z>,
+    now: DateTime<Utc>,
+    tz: &Z,
+) -> Badge {
+    let kind = period_kind_text(period.kind);
     let edge = match milestone {
         Milestone::Start => "から",
         Milestone::End => "まで",
@@ -1232,14 +1247,382 @@ pub fn period_badge<Z: TimeZone>(
             .iter()
             .map(|change| change_text(change, now, tz)),
     );
-    Some(Badge {
+    Badge {
         text,
         tone: match milestone {
             Milestone::Start => Tone::Starting,
             Milestone::End => Tone::Ending,
         },
         detail: detail.join("\n"),
-    })
+    }
+}
+
+// ---- 今日・明日の予定の画面 ----
+
+/// 「今日の予定」の画面で見る日。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Day {
+    Today,
+    Tomorrow,
+}
+
+impl Day {
+    fn range(self, days: &Days) -> &Range<DateTime<Utc>> {
+        match self {
+            Day::Today => &days.today,
+            Day::Tomorrow => &days.tomorrow,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Day::Today => "今日",
+            Day::Tomorrow => "明日",
+        }
+    }
+}
+
+/// その日の予定のまとまり。宣言の順に画面に並べる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DayGroup {
+    /// 今確かめたいメンテナンス (予定の時間内・実施中の報告・終了未定・終了予定を過ぎた・決められない)。
+    /// 今日だけ。
+    Now,
+    /// その日の時刻の決まった予定 (メンテナンスの時間帯と、数える種類の期間の始まり・終わりの節目)。
+    Timed,
+    /// 日付だけで、時刻の書かれていない予定。
+    DateOnly,
+    /// その日のメンテナンスのうち、終わった (完了の報告・時刻を過ぎた)・中止・延期したもの。
+    /// 件数には数えない。
+    Finished,
+}
+
+/// その日の予定の 1 件。同じ記事の、時間帯と状態が同じで対象だけが違うメンテナンスは 1 件にまとめる。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DayEntry {
+    pub entry_id: i64,
+    pub source_id: String,
+    pub group: DayGroup,
+    /// 並べる時刻。メンテナンスは始まり (なければ実施中の報告の時点)、期間はその日の節目。
+    pub at: Option<DateTime<Utc>>,
+    /// 予定の名前 (「メンテナンス (PC版・iOS版)」「ガチャ (〇〇ピックアップ)」)。
+    pub title: String,
+    pub badge: Badge,
+    /// 時間帯 (延長・日程変更の後のもの)。日時が書かれていなければ `None`。
+    pub when: Option<String>,
+    pub maintenance: bool,
+}
+
+impl DayEntry {
+    /// 件数に数えるか (終わった・中止・延期を除く)。
+    pub fn counts(&self) -> bool {
+        self.group != DayGroup::Finished
+    }
+}
+
+/// メンテナンスのまとまりを、その日のどこに置くか。その日に関係しなければ `None`。
+fn maintenance_day_group(
+    maintenance: &ResolvedMaintenance,
+    state: MaintenanceState,
+    day: Day,
+    days: &Days,
+) -> Option<DayGroup> {
+    let range = day.range(days);
+    let on_day = occupied(maintenance.window()).is_some_and(|occupied| overlaps(occupied, range))
+        || maintenance
+            .ongoing_bound()
+            .and_then(|bound| Some((bound.first()?, bound.last()?)))
+            .is_some_and(|reported| overlaps(reported, range));
+    let date_only = matches!(
+        bounds(maintenance.window()),
+        (Bound::Day { .. }, _) | (Bound::Undecided | Bound::Unspecified, Bound::Day { .. })
+    );
+    match state {
+        MaintenanceState::Undated => None,
+        MaintenanceState::Completed
+        | MaintenanceState::Cancelled
+        | MaintenanceState::Postponed
+        | MaintenanceState::Past => on_day.then_some(DayGroup::Finished),
+        MaintenanceState::InWindow
+        | MaintenanceState::ReportedOngoing
+        | MaintenanceState::EndUndecided
+        | MaintenanceState::Overdue
+        | MaintenanceState::EndUnknown
+        | MaintenanceState::UntilEnd
+            if day == Day::Today =>
+        {
+            Some(DayGroup::Now)
+        }
+        MaintenanceState::Unresolved if day == Day::Today && on_day => Some(DayGroup::Now),
+        _ if on_day && date_only => Some(DayGroup::DateOnly),
+        _ if on_day => Some(DayGroup::Timed),
+        _ => None,
+    }
+}
+
+/// 報告の対象が予告の対象を含むか (`gnn_schedule` の突き合わせと同じ決まり)。
+fn report_covers(report: &Scope, plan: &Scope) -> bool {
+    match (report, plan) {
+        (Scope::Unknown | Scope::All, _) => true,
+        (Scope::Named(_), Scope::Unknown | Scope::All) => false,
+        (Scope::Named(report), Scope::Named(plan)) => report == plan,
+    }
+}
+
+impl Agenda {
+    /// 今日・明日の予定 (「今日の予定」の画面)。まとまりの順、まとまりの中は時刻の順 (時刻のないものは後)。
+    ///
+    /// メンテナンスはその日に時間帯が重なるもの (今日は、今確かめたいものも)、期間は数える種類
+    /// (イベント・ガチャ・キャンペーン) の節目がその日にあるもの。終わった節目は数えない
+    /// ([`live_milestones`])。同じ期間の節目がその日に 2 つあれば、始まりを出す。
+    ///
+    /// 同じメンテナンスは記事をまたいで 1 件にする: 予告の記事に取り込まれた報告の記事の件 (予告の
+    /// `resolved_by` がその記事で、対象が合うもの) は出さず、同じゲーム・同じ対象・同じ開始の件 (予告と
+    /// 再告知、開始を書いた延長の報告) は、いちばん古い記事 (記事の番号の小さいもの) を代表にする。
+    pub fn day_entries<Z: TimeZone>(
+        &self,
+        day: Day,
+        now: DateTime<Utc>,
+        days: &Days,
+        tz: &Z,
+    ) -> Vec<DayEntry> {
+        let clock = Clock::new(now, tz);
+        let range = day.range(days);
+        // 報告を取り込んだ予告 (ソース・報告の記事・予告の対象)。
+        let folded: Vec<(&str, i64, &Scope)> = self
+            .items
+            .iter()
+            .filter_map(|item| match &item.detail {
+                AgendaDetail::Maintenance(maintenance) => maintenance
+                    .resolved_by
+                    .filter(|by| *by != item.entry_id)
+                    .map(|by| (item.source_id.as_str(), by, &maintenance.scope)),
+                AgendaDetail::Period(_) => None,
+            })
+            .collect();
+        let is_folded = |item: &AgendaItem, scope: &Scope| {
+            folded.iter().any(|(source, by, plan)| {
+                *source == item.source_id && *by == item.entry_id && report_covers(scope, plan)
+            })
+        };
+        let mut maintenance_entries = Vec::new();
+        let mut visited = HashSet::new();
+        for item in &self.items {
+            if !visited.insert(item.entry_id) {
+                continue;
+            }
+            for group in maintenance_groups(self.of_entry(item.entry_id), now, tz) {
+                if is_folded(group.item, &group.maintenance.scope) {
+                    continue;
+                }
+                let Some(day_group) =
+                    maintenance_day_group(group.maintenance, group.parts.state, day, days)
+                else {
+                    continue;
+                };
+                let title = if group.names.is_empty() {
+                    match scope_text(&group.maintenance.scope) {
+                        Some(scope) => format!("メンテナンス ({scope})"),
+                        None => "メンテナンス".to_string(),
+                    }
+                } else {
+                    format!("メンテナンス ({})", group.names.join("・"))
+                };
+                maintenance_entries.push(DayEntry {
+                    entry_id: group.item.entry_id,
+                    source_id: group.item.source_id.clone(),
+                    group: day_group,
+                    at: group.start,
+                    title,
+                    when: clock.window(group.maintenance.window()),
+                    maintenance: true,
+                    badge: group.badge(),
+                });
+            }
+        }
+        // 同じゲーム・同じ対象・同じ開始の件は、いちばん古い記事のものを残す。
+        maintenance_entries.sort_by_key(|entry| entry.entry_id);
+        let mut seen = HashSet::new();
+        let mut entries: Vec<DayEntry> = maintenance_entries
+            .into_iter()
+            .filter(|entry| {
+                entry.at.is_none()
+                    || seen.insert((entry.source_id.clone(), entry.title.clone(), entry.at))
+            })
+            .collect();
+        for item in &self.items {
+            let AgendaDetail::Period(period) = &item.detail else {
+                continue;
+            };
+            let period = &period.period;
+            if !counts_for_agenda(period.kind) {
+                continue;
+            }
+            let Some((milestone, milestone_range)) = live_milestones(&period.window, now)
+                .into_iter()
+                .filter(|(_, milestone_range)| overlaps(*milestone_range, range))
+                .min_by_key(|(milestone, _)| *milestone == Milestone::End)
+            else {
+                continue;
+            };
+            let (from, to) = milestone_range;
+            let kind = period_kind_text(period.kind);
+            entries.push(DayEntry {
+                entry_id: item.entry_id,
+                source_id: item.source_id.clone(),
+                group: if from == to {
+                    DayGroup::Timed
+                } else {
+                    DayGroup::DateOnly
+                },
+                // 終わりの節目は 1 秒前にしているので、並べる時刻は元の時刻に戻す。
+                at: Some(if from == to && milestone == Milestone::End {
+                    from + Duration::seconds(1)
+                } else {
+                    from
+                }),
+                title: match &period.label {
+                    Some(label) => format!("{kind} ({label})"),
+                    None => kind.to_string(),
+                },
+                badge: milestone_badge(
+                    period,
+                    milestone,
+                    milestone_range,
+                    day.label(),
+                    &clock,
+                    now,
+                    tz,
+                ),
+                when: clock.window(&period.window),
+                maintenance: false,
+            });
+        }
+        entries.sort_by(|a, b| {
+            (a.group, a.at.is_none(), a.at, a.entry_id).cmp(&(
+                b.group,
+                b.at.is_none(),
+                b.at,
+                b.entry_id,
+            ))
+        });
+        entries
+    }
+
+    /// 今日に関係する予定の件数 (終わった・中止・延期を除く)。サイドバーの「今日の予定」に出す。
+    pub fn today_count<Z: TimeZone>(&self, now: DateTime<Utc>, days: &Days, tz: &Z) -> usize {
+        self.day_entries(Day::Today, now, days, tz)
+            .iter()
+            .filter(|entry| entry.counts())
+            .count()
+    }
+
+    /// 予定の条件に合う記事 (記事の番号の昇順)。お知らせの一覧の「予定で絞る」に使う。
+    /// 規則は [`ScheduleFilter`]。記事どうしはまとめない (予告と報告の記事のどちらも合う)。
+    pub fn filter_entries(
+        &self,
+        filter: ScheduleFilter,
+        now: DateTime<Utc>,
+        days: &Days,
+    ) -> Vec<i64> {
+        let mut ids: Vec<i64> = self
+            .items
+            .iter()
+            .filter(|item| item_matches(item, filter, now, days))
+            .map(|item| item.entry_id)
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+}
+
+// ---- 予定で絞る ----
+
+/// お知らせの一覧を予定で絞る条件。メンテナンスと、数える種類の期間 (イベント・ガチャ・キャンペーン。
+/// 販売・受け取りなどはバッジと同じく数えない) を見る。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ScheduleFilter {
+    /// その日に関係する予定がある。「今日の予定」の画面に出るもの (終わった・中止・延期したメンテナンスを含む)。
+    Related(Day),
+    /// その日に始まる予定がある。メンテナンスの開始 (中止・延期したものを除く。始まったあとも含む) と、
+    /// 期間の始まり。
+    Starts(Day),
+    /// その日に終わる予定がある。まだ終わっていないものだけ: メンテナンスは終了予定がその日で、完了・中止・
+    /// 延期の報告がなく、終了予定を過ぎてしばらくたっていないもの (過ぎたばかりで完了の報告がないものは含む)。
+    /// 期間は終わりの節目がその日で、まだ過ぎていないもの。0 時ちょうどの終わりは前の日に数える。
+    Ends(Day),
+}
+
+impl ScheduleFilter {
+    pub fn day(self) -> Day {
+        match self {
+            ScheduleFilter::Related(day)
+            | ScheduleFilter::Starts(day)
+            | ScheduleFilter::Ends(day) => day,
+        }
+    }
+}
+
+/// 開始・終了の値がその日にあるか。時刻は `[0 時, 翌日 0 時)` に入るか、日付だけならその日か。
+/// `end` なら、0 時ちょうどの終わりを前の日に数える (期間の節目と同じ)。
+fn bound_on(bound: Bound, day: &Range<DateTime<Utc>>, end: bool) -> bool {
+    match bound {
+        Bound::At { at, .. } => {
+            let at = if end { at - Duration::seconds(1) } else { at };
+            day.contains(&at)
+        }
+        Bound::Day { from, to, .. } => overlaps((from, to), day),
+        Bound::Undecided | Bound::Unspecified => false,
+    }
+}
+
+/// 予定の表の 1 行が条件に合うか。
+fn item_matches(
+    item: &AgendaItem,
+    filter: ScheduleFilter,
+    now: DateTime<Utc>,
+    days: &Days,
+) -> bool {
+    let day = filter.day();
+    let range = day.range(days);
+    match &item.detail {
+        AgendaDetail::Maintenance(maintenance) => {
+            let state = maintenance_state(maintenance, now);
+            let (start, end) = bounds(maintenance.window());
+            match filter {
+                ScheduleFilter::Related(_) => {
+                    maintenance_day_group(maintenance, state, day, days).is_some()
+                }
+                ScheduleFilter::Starts(_) => {
+                    !matches!(
+                        maintenance.disposition,
+                        Disposition::Cancelled | Disposition::Postponed
+                    ) && bound_on(start, range, false)
+                }
+                ScheduleFilter::Ends(_) => {
+                    matches!(
+                        maintenance.disposition,
+                        Disposition::Scheduled | Disposition::Unresolved
+                    ) && state != MaintenanceState::Past
+                        && bound_on(end, range, true)
+                }
+            }
+        }
+        AgendaDetail::Period(period) => {
+            counts_for_agenda(period.period.kind)
+                && live_milestones(&period.period.window, now).into_iter().any(
+                    |(milestone, milestone_range)| {
+                        overlaps(milestone_range, range)
+                            && match filter {
+                                ScheduleFilter::Related(_) => true,
+                                ScheduleFilter::Starts(_) => milestone == Milestone::Start,
+                                ScheduleFilter::Ends(_) => milestone == Milestone::End,
+                            }
+                    },
+                )
+        }
+    }
 }
 
 // ---- サイドバーの印 ----
@@ -1278,8 +1661,27 @@ impl Agenda {
         let mut boundaries = Vec::new();
         for (index, item) in items.iter().enumerate() {
             by_entry.entry(item.entry_id).or_default().push(index);
-            if let AgendaDetail::Maintenance(maintenance) = &item.detail {
-                boundaries.extend(maintenance_boundaries(maintenance));
+            match &item.detail {
+                AgendaDetail::Maintenance(maintenance) => {
+                    boundaries.extend(maintenance_boundaries(maintenance));
+                }
+                // 数える種類の期間は、終わりを過ぎるとバッジ・今日明日の並び・「今日終わる」の絞り込みから
+                // 外れる ([`live_milestones`])。始まりは過ぎても外れないので数えない。
+                AgendaDetail::Period(period) if counts_for_agenda(period.period.kind) => {
+                    boundaries.extend(
+                        milestones(&period.period.window)
+                            .into_iter()
+                            .filter(|(milestone, _)| *milestone == Milestone::End)
+                            .map(|(_, (from, to))| {
+                                if from == to {
+                                    from + Duration::seconds(1)
+                                } else {
+                                    to
+                                }
+                            }),
+                    );
+                }
+                AgendaDetail::Period(_) => {}
             }
         }
         boundaries.sort();
@@ -2233,7 +2635,110 @@ mod tests {
             agenda.next_boundary(jst(11, 12, 22, 0)),
             Some(jst(11, 13, 5, 0))
         );
+        // 数える種類の期間の終わりも区切りにする (始まり・数えない種類の期間は区切りにしない)。
+        assert_eq!(
+            agenda.next_boundary(jst(11, 21, 5, 0)),
+            Some(jst(11, 26, 13, 59))
+        );
         assert_eq!(agenda.next_boundary(jst(12, 31, 0, 0)), None);
+    }
+
+    #[test]
+    fn schedule_filters_find_articles_by_day_start_and_end() {
+        let now = jst(11, 13, 12, 0);
+        let days = Days::at(now, &tokyo());
+        let planned = |entry_id: i64, start, end, disposition| {
+            item(
+                entry_id,
+                "game",
+                AgendaDetail::from(maintenance(window(start, end), disposition)),
+            )
+        };
+        let agenda = Agenda::new(vec![
+            // 予定の時間内。
+            planned(
+                1,
+                at(11, 13, 11, 0),
+                at(11, 13, 14, 0),
+                Disposition::Scheduled,
+            ),
+            // 今日の夜から明日にかけて。
+            planned(
+                2,
+                at(11, 13, 23, 0),
+                at(11, 14, 2, 0),
+                Disposition::Scheduled,
+            ),
+            // 0 時ちょうどに終わる (今日の終わりに数える)。
+            planned(
+                3,
+                at(11, 13, 22, 0),
+                at(11, 14, 0, 0),
+                Disposition::Scheduled,
+            ),
+            // 完了の報告がある (始まりには数え、終わりには数えない)。
+            planned(
+                4,
+                at(11, 13, 4, 0),
+                at(11, 13, 6, 0),
+                Disposition::Completed,
+            ),
+            // 中止 (今日に関係するが、始まりにも終わりにも数えない)。
+            planned(
+                5,
+                at(11, 13, 15, 0),
+                at(11, 13, 16, 0),
+                Disposition::Cancelled,
+            ),
+            // 今日終わるガチャ・明日始まるイベント。
+            item(
+                6,
+                "game",
+                period(PeriodKind::Gacha, at(11, 1, 12, 0), at(11, 13, 23, 59)),
+            ),
+            item(
+                7,
+                "game",
+                period(PeriodKind::Event, at(11, 14, 15, 0), at(11, 20, 23, 59)),
+            ),
+            // 今日のうちに終わったキャンペーンは、もう今日終わるものに数えない。
+            item(
+                8,
+                "game",
+                period(PeriodKind::Campaign, at(11, 12, 0, 0), at(11, 13, 11, 59)),
+            ),
+            // 販売はバッジと同じく数えない。
+            item(
+                9,
+                "game",
+                period(PeriodKind::Sale, at(11, 13, 12, 0), at(11, 13, 20, 0)),
+            ),
+            // 日付だけの始まり。
+            item(
+                10,
+                "game",
+                period(PeriodKind::Event, date(11, 13), Slot::Unspecified),
+            ),
+        ]);
+        let ids = |filter| agenda.filter_entries(filter, now, &days);
+        assert_eq!(
+            ids(ScheduleFilter::Related(Day::Today)),
+            vec![1, 2, 3, 4, 5, 6, 10]
+        );
+        assert_eq!(ids(ScheduleFilter::Related(Day::Tomorrow)), vec![2, 7]);
+        assert_eq!(
+            ids(ScheduleFilter::Starts(Day::Today)),
+            vec![1, 2, 3, 4, 10]
+        );
+        assert_eq!(ids(ScheduleFilter::Starts(Day::Tomorrow)), vec![7]);
+        assert_eq!(ids(ScheduleFilter::Ends(Day::Today)), vec![1, 3, 6]);
+        assert_eq!(ids(ScheduleFilter::Ends(Day::Tomorrow)), vec![2]);
+        // 期間は終わりを過ぎると、今日終わるものから外れる (6)。メンテナンスは、終了予定を過ぎても
+        // 完了の報告がなければしばらく残す (1)。
+        assert_eq!(
+            agenda.filter_entries(ScheduleFilter::Ends(Day::Today), jst(11, 13, 23, 59), &days),
+            vec![1, 3]
+        );
     }
 
     #[test]
@@ -2750,5 +3255,220 @@ mod tests {
                 "iOS版 メンテ中 (19:00 まで予定)"
             ]
         );
+    }
+
+    #[test]
+    fn day_entries_group_the_schedule_of_today_and_tomorrow() {
+        let now = jst(11, 13, 12, 0);
+        let days = Days::at(now, &tokyo());
+        let scoped = |entry_id: i64, index: usize, scope: &str| {
+            let mut m = maintenance(
+                window(at(11, 13, 15, 0), at(11, 13, 16, 0)),
+                Disposition::Scheduled,
+            );
+            m.index = index;
+            m.scope = Scope::Named(scope.into());
+            item(entry_id, "d", AgendaDetail::from(m))
+        };
+        let agenda = Agenda::new(vec![
+            // 予定の時間内。
+            item(
+                1,
+                "a",
+                AgendaDetail::from(maintenance(
+                    window(at(11, 13, 11, 0), at(11, 13, 14, 0)),
+                    Disposition::Scheduled,
+                )),
+            ),
+            // 今日これから。
+            item(
+                2,
+                "a",
+                AgendaDetail::from(maintenance(
+                    window(at(11, 13, 18, 0), at(11, 13, 19, 0)),
+                    Disposition::Scheduled,
+                )),
+            ),
+            // 日付だけ。
+            item(
+                3,
+                "b",
+                AgendaDetail::from(maintenance(
+                    window(date(11, 13), Slot::Unspecified),
+                    Disposition::Scheduled,
+                )),
+            ),
+            // 完了の報告がある (数えない)。
+            item(
+                4,
+                "b",
+                AgendaDetail::from(maintenance(
+                    window(at(11, 13, 4, 0), at(11, 13, 6, 0)),
+                    Disposition::Completed,
+                )),
+            ),
+            // 明日。
+            item(
+                5,
+                "c",
+                AgendaDetail::from(maintenance(
+                    window(at(11, 14, 14, 0), at(11, 14, 17, 0)),
+                    Disposition::Scheduled,
+                )),
+            ),
+            // 今日終わるガチャ・今日始まったイベント (始まったあとも今日の節目に数える)。
+            item(
+                6,
+                "c",
+                period(PeriodKind::Gacha, at(11, 1, 12, 0), at(11, 13, 23, 59)),
+            ),
+            item(
+                7,
+                "c",
+                period(PeriodKind::Event, at(11, 13, 0, 0), at(11, 20, 23, 59)),
+            ),
+            // 販売は数えない。終わってしまった終わりの節目も数えない。
+            item(
+                8,
+                "c",
+                period(PeriodKind::Sale, at(11, 13, 12, 0), at(11, 13, 20, 0)),
+            ),
+            item(
+                9,
+                "c",
+                period(PeriodKind::Campaign, at(11, 12, 0, 0), at(11, 13, 11, 59)),
+            ),
+            // 対象だけが違うメンテナンスは 1 件にまとめる。
+            scoped(10, 0, "Android版"),
+            scoped(10, 1, "iOS版"),
+        ]);
+        let summary = |day: Day| {
+            agenda
+                .day_entries(day, now, &days, &tokyo())
+                .into_iter()
+                .map(|entry| (entry.entry_id, entry.group, entry.title, entry.badge.text))
+                .collect::<Vec<_>>()
+        };
+        let entry = |id: i64, group: DayGroup, title: &str, badge: &str| {
+            (id, group, title.to_string(), badge.to_string())
+        };
+        assert_eq!(
+            summary(Day::Today),
+            vec![
+                entry(
+                    1,
+                    DayGroup::Now,
+                    "メンテナンス",
+                    "メンテ中 (14:00 まで予定)"
+                ),
+                entry(7, DayGroup::Timed, "イベント", "イベント 今日 00:00 から"),
+                entry(
+                    10,
+                    DayGroup::Timed,
+                    "メンテナンス (Android版・iOS版)",
+                    "Android版・iOS版 メンテ 11/13(金) 15:00–16:00"
+                ),
+                entry(
+                    2,
+                    DayGroup::Timed,
+                    "メンテナンス",
+                    "メンテ 11/13(金) 18:00–19:00"
+                ),
+                entry(6, DayGroup::Timed, "ガチャ", "ガチャ 今日 23:59 まで"),
+                entry(3, DayGroup::DateOnly, "メンテナンス", "メンテ 11/13(金)"),
+                entry(4, DayGroup::Finished, "メンテナンス", "メンテ終了"),
+            ]
+        );
+        assert_eq!(agenda.today_count(now, &days, &tokyo()), 6);
+        assert_eq!(
+            summary(Day::Tomorrow),
+            vec![entry(
+                5,
+                DayGroup::Timed,
+                "メンテナンス",
+                "メンテ 11/14(土) 14:00–17:00"
+            )]
+        );
+        // 終了予定を過ぎたメンテナンスは、今日の「今確かめたい」に出す (完了とはしない)。
+        let overdue = Agenda::new(vec![item(
+            1,
+            "a",
+            AgendaDetail::from(maintenance(
+                window(at(11, 13, 9, 0), at(11, 13, 11, 30)),
+                Disposition::Scheduled,
+            )),
+        )]);
+        let entries = overdue.day_entries(Day::Today, now, &days, &tokyo());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].group, DayGroup::Now);
+        assert_eq!(entries[0].badge.tone, Tone::Attention);
+        assert!(entries[0].counts());
+    }
+
+    #[test]
+    fn day_entries_show_one_maintenance_across_its_articles() {
+        let now = jst(11, 13, 16, 0);
+        let days = Days::at(now, &tokyo());
+        // 予告 (記事 1) と再告知 (記事 2) は、完了の報告 (記事 3) を取り込んで完了になっている。
+        let resolved = |entry_id: i64| {
+            let mut m = maintenance(
+                window(at(11, 13, 13, 0), at(11, 13, 15, 0)),
+                Disposition::Completed,
+            );
+            m.resolved_by = Some(3);
+            item(entry_id, "a", AgendaDetail::from(m))
+        };
+        // 完了の報告そのもの (開始は書かれていない)。
+        let report = maintenance(
+            window(Slot::Unspecified, Slot::Unspecified),
+            Disposition::Completed,
+        );
+        let report = ResolvedMaintenance {
+            actual: window(Slot::Unspecified, at(11, 13, 14, 30)),
+            ..report
+        };
+        // 別のゲームの、同じ時間帯のメンテナンスはまとめない (完了の報告がないので終了予定を過ぎている)。
+        let other = maintenance(
+            window(at(11, 13, 13, 0), at(11, 13, 15, 0)),
+            Disposition::Scheduled,
+        );
+        let agenda = Agenda::new(vec![
+            resolved(2),
+            resolved(1),
+            item(3, "a", AgendaDetail::from(report)),
+            item(4, "b", AgendaDetail::from(other)),
+        ]);
+        let entries = agenda.day_entries(Day::Today, now, &days, &tokyo());
+        let summary: Vec<(i64, &str, DayGroup)> = entries
+            .iter()
+            .map(|entry| (entry.entry_id, entry.source_id.as_str(), entry.group))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![(4, "b", DayGroup::Now), (1, "a", DayGroup::Finished)]
+        );
+        assert_eq!(agenda.today_count(now, &days, &tokyo()), 1);
+        // 対象の名前のある報告は、同じ名前の予告にだけ取り込まれる。
+        let mut named_plan = maintenance(
+            window(at(11, 13, 13, 0), at(11, 13, 15, 0)),
+            Disposition::Completed,
+        );
+        named_plan.scope = Scope::Named("PC版".into());
+        named_plan.resolved_by = Some(6);
+        let mut named_report = maintenance(
+            window(at(11, 13, 13, 0), at(11, 13, 15, 0)),
+            Disposition::Completed,
+        );
+        named_report.scope = Scope::Named("iOS版".into());
+        let agenda = Agenda::new(vec![
+            item(5, "a", AgendaDetail::from(named_plan)),
+            item(6, "a", AgendaDetail::from(named_report)),
+        ]);
+        let ids: Vec<i64> = agenda
+            .day_entries(Day::Today, now, &days, &tokyo())
+            .iter()
+            .map(|entry| entry.entry_id)
+            .collect();
+        assert_eq!(ids, vec![5, 6]);
     }
 }

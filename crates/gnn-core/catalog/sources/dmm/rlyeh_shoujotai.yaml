@@ -1,4 +1,4 @@
-# ルルイエ少女隊
+# ルルイエ少女隊 (DMM GAMES 版。FANZA GAMES 版は rlyeh_shoujotai_r18)
 # yaml-language-server: $schema=../../schema/source.schema.json
 schema: 2
 min_app_version: '26.11.6'
@@ -9,7 +9,7 @@ tags:
 lists:
   - kind: json
     request:
-      url: 'https://assets.cthulhu-rog.net/res/production/information/news/1/news.json'
+      url: 'https://assets.cthulhu-rog.net/res/production/information/news/0/news.json'
     items: '/newsList'
     fields:
       id: '/id'

@@ -10,6 +10,8 @@
 //! - `app.icns`: macOS のアプリのアイコン (16〜1024px)。Apple のアイコンの格子に合わせて、
 //!   1024px の中に 824px で置き、影を付ける
 //! - `app.png`: 512px (README などに使う)
+//! - `app-40.png`・`app-80.png`・`app-144.png`: 画面の中に出すロゴ (タイトルバーの 20px・設定の 40px・
+//!   本文の欄の案内の 72px の 2 倍)
 //! - `tray.png`: Windows のタスクトレイ (64px)
 //! - `tray-template.png`: macOS のメニューバー (36px。18pt の 2 倍)
 //! - `docs/images/app.png`: README のロゴ (256px)
@@ -84,6 +86,11 @@ fn export(dir: &Path) -> Result<()> {
 
     write_ico(&dir.join("app.ico"), &app)?;
     save_png(&dir.join("app.png"), &render(&app, 512)?)?;
+    // 画面の中のロゴ。gpui は画像をミップマップなしの線形補間で縮めるので、2 倍を超えて縮めると
+    // 粗くなる。出す大きさの 2 倍で書き出し、画面の倍率に合うものを選ぶ (`ui::components::AppLogo`)。
+    for size in [40, 80, 144] {
+        save_png(&dir.join(format!("app-{size}.png")), &render(&app, size)?)?;
+    }
     save_png(&dir.join("tray.png"), &render(&tray, 64)?)?;
     write_icns(&dir.join("app.icns"), &macos)?;
     save_png(&dir.join("tray-template.png"), &render(&tray_template, 36)?)?;

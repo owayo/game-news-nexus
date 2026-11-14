@@ -1,0 +1,23 @@
+# ルルイエ少女隊X (ルルイエ少女隊 の FANZA GAMES 版。一般版は rlyeh_shoujotai)
+# yaml-language-server: $schema=../../schema/source.schema.json
+schema: 2
+min_app_version: '26.11.6'
+id: rlyeh_shoujotai_r18
+name: 'ルルイエ少女隊X'
+adult: true
+general_edition: rlyeh_shoujotai
+inherit_articles: true
+tags:
+  - dmm
+lists:
+  - kind: json
+    request:
+      url: 'https://assets.cthulhu-rog.net/res/production/information/news/1/news.json'
+    items: '/newsList'
+    fields:
+      id: '/id'
+      title: '/title'
+      published: '/postedAt'
+      body: '/message'
+body:
+  newlines_to_br: true

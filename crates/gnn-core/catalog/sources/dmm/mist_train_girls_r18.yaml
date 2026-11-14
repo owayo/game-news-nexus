@@ -1,0 +1,30 @@
+# ミストトレインガールズX (ミストトレインガールズ の FANZA GAMES 版。一般版は mist_train_girls)
+# yaml-language-server: $schema=../../schema/source.schema.json
+schema: 2
+min_app_version: '26.11.6'
+id: mist_train_girls_r18
+name: 'ミストトレインガールズX'
+adult: true
+general_edition: mist_train_girls
+inherit_articles: true
+tags:
+  - dmm
+lists:
+  - kind: json
+    request:
+      url: 'https://fd-misttrain-prod.azurefd.net/api/info/news?gameVersion=2'
+    items: '/articles'
+    filter:
+      - pointer: '/visible'
+        eq: true
+    fields:
+      id: '/articleUrl'
+      title: '/title'
+      published: '/date'
+      image: '/bannerImgUrl'
+detail:
+  kind: html
+  request:
+    url: 'https://fd-misttrain-prod.azurefd.net/api/info/news?id={{item.id}}'
+body:
+  image_in_body: true

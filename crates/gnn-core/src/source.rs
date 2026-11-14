@@ -48,6 +48,11 @@ const LATER_FEATURES: &[(&str, &str, FeatureCheck)] = &[
     ("画像の同一性 (url_identity)", "26.11.6", |source| {
         source.url_identity != UrlIdentity::default()
     }),
+    (
+        "成人向けの版 (adult・general_edition・inherit_articles)",
+        "26.11.6",
+        |source| source.adult || source.general_edition.is_some() || source.inherit_articles,
+    ),
 ];
 
 /// 1 つの取得元。
@@ -78,6 +83,19 @@ pub struct SourceConfig {
     /// 利用者向けの説明。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// 成人向け (FANZA GAMES の版など)。利用者が設定で 18 歳以上であることと、成人向けの内容を
+    /// 出すことに同意したときだけ使う。同意していなければ、取得もソース画面への表示もしない。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub adult: bool,
+    /// 同じゲームの一般向けの版のソースの ID (`adult: true` のときだけ書ける)。成人向けの版を使う
+    /// 設定では、一般向けの版の代わりにこのソースを使い、on/off などの購読は一般向けの版のものを使う。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub general_edition: Option<String>,
+    /// 一般向けの版のソースがこれまで成人向けの版の取得先から取得していた記事を、このソースに移す
+    /// (`general_edition` があるときだけ書ける)。一般向けの版の取得先を、成人向けの版から一般向けの版に
+    /// 直すときに書く。アプリは組を初めて見たときに 1 度だけ、一般向けの版の記事を既読・予定ごと移す。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub inherit_articles: bool,
     /// タイムゾーンの指定がない日時をどの地域時刻として読むか。既定は `Asia/Tokyo`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
@@ -1522,6 +1540,31 @@ impl SourceConfig {
         }
         if self.name.trim().is_empty() {
             check.push("name", "名前を入れてください");
+        }
+        if let Some(general) = &self.general_edition {
+            if !self.adult {
+                check.push(
+                    "general_edition",
+                    "一般向けの版を書けるのは、成人向けのソース (`adult: true`) だけです",
+                );
+            }
+            if !is_valid_id(general) {
+                check.push(
+                    "general_edition",
+                    "一般向けの版のソースの ID (英小文字・数字・`_`・`-`) を書いてください",
+                );
+            } else if *general == self.id {
+                check.push(
+                    "general_edition",
+                    "自分とは別の、一般向けの版のソースの ID を書いてください",
+                );
+            }
+        }
+        if self.inherit_articles && self.general_edition.is_none() {
+            check.push(
+                "inherit_articles",
+                "記事を引き継げるのは、一般向けの版 (general_edition) を書いた成人向けのソースだけです",
+            );
         }
         for (field, tz) in [
             ("timezone", &self.timezone),

@@ -1,0 +1,23 @@
+# モンスター娘TD X (モンスター娘TD の FANZA GAMES 版。一般版は monster_musume_td)
+# yaml-language-server: $schema=../../schema/source.schema.json
+schema: 2
+min_app_version: '26.11.6'
+id: monster_musume_td_r18
+name: 'モンスター娘TD X'
+adult: true
+general_edition: monster_musume_td
+inherit_articles: true
+tags:
+  - dmm
+lists:
+  - kind: json
+    request:
+      url: 'https://assets.game-monmusu-td.net/res/information/news/1/news.json'
+    items: '/newsList'
+    fields:
+      id: '/id'
+      title: '/title'
+      published: '/postedAt'
+      body: '/message'
+body:
+  newlines_to_br: true

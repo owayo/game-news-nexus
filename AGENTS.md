@@ -5,7 +5,8 @@
 - ツールは `mise install`、辞書は `mise run dict` で用意する。
 - 検証は `mise run lint`、`mise run test`、`mise run catalog-check`、`mise run licenses -- --check`。
 - 動作確認には一時ディレクトリを `GNN_HOME` に指定し、利用者のデータを使わない。
-- 画面はニュース・ソース・設定。`GNN_DEV_PAGE` は `news`・`sources`・`settings` を使う。
+- 画面はお知らせ・今日の予定・ソース・設定。`GNN_DEV_PAGE` は `news`・`agenda`・`sources`・`settings` を使う。
+  色は `crates/gnn-app/assets/theme.json` と `ui::theme::Palette` から取り、共通の見た目は `ui/components/` に置く。
 - カタログの取得先は `CATALOG_URL` に固定し、設定項目やフォルダ選択は設けない。
 - 購読の読み取り・初期化・保存は `ConfigStore` を通す。`subscriptions.lock` は削除・置換しない。
   OS のファイルロックでプロセス間も排他し、取得できないときは保存せず誤りを返す。

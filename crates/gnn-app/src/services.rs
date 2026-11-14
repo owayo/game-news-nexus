@@ -14,7 +14,7 @@
 //! [`Services::spawn`] (と `blocking`) で始め、終わるときに待つ処理として数える。
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::time::{Duration as StdDuration, Instant, SystemTime};
@@ -24,7 +24,9 @@ use chrono::{DateTime, Duration, Utc};
 use chrono_tz::Tz;
 use futures::StreamExt as _;
 use gnn_core::agenda::{self, AgendaDetail, AgendaItem, Resolution, SourceSchedule};
-use gnn_core::catalog::{CATALOG_URL, Catalog, ResolvedSource, resolve};
+use gnn_core::catalog::{
+    CATALOG_READER_VERSION, CATALOG_URL, Catalog, ResolvedSource, hidden_adult_sources, resolve,
+};
 use gnn_core::config::{CachedFile, CatalogCache, LocalSourceFile};
 use gnn_core::image_ref;
 use gnn_core::source::Channel;
@@ -95,6 +97,8 @@ pub enum ServiceEvent {
         source_id: String,
     },
     FetchFinished(FetchSummary),
+    /// 一般向けの版の記事を成人向けの版へ移した (取得の定義の `inherit_articles`)。一覧と予定を読み直す。
+    EntriesMoved,
     /// 1 回の巡回が終わった。新着を通知に使う。`pruned` は保存期間を過ぎて消した記事の数。
     CycleFinished {
         added: Vec<AddedEntry>,
@@ -149,6 +153,8 @@ impl FetchSummary {
 #[derive(Debug, Clone)]
 pub struct AddedEntry {
     pub entry_id: i64,
+    /// 取得したソース。通知する前に、今も使っているかを確かめる。
+    pub source_id: String,
     pub source_name: String,
     pub channel: Channel,
     pub title: String,
@@ -260,6 +266,9 @@ struct Inner {
     /// 同時に取得するソースの数を、手動の取得と定期の取得をまとめて抑える。
     permits: Mutex<(usize, Arc<Semaphore>)>,
     wake: Notify,
+    /// 使うソースを決め直すたびに進める。取得中のソースが外れたら取り消すために見る
+    /// ([`Services::source_removed`])。
+    sources_version: tokio::sync::watch::Sender<u64>,
     /// 予定の読み取りを促す (取得の保存・旧形式の取り込み・ソースの変更・記事の削除のあと)。
     analysis_wake: Notify,
     last_image_prune: Mutex<Option<SystemTime>>,
@@ -379,6 +388,8 @@ struct Shared {
     subscriptions: Subscriptions,
     local: Vec<LocalSourceFile>,
     resolved: Vec<ResolvedSource>,
+    /// 使わない成人向けのソース。記事を開く・通知する・書き出すときにも隠す。
+    hidden: BTreeSet<String>,
 }
 
 impl Shared {
@@ -388,8 +399,31 @@ impl Shared {
             .iter()
             .filter_map(|file| file.source.as_ref().ok().cloned())
             .collect();
-        self.resolved = resolve(&self.catalog, &self.subscriptions, &local);
+        self.resolved = resolve(
+            &self.catalog,
+            &self.subscriptions,
+            &local,
+            self.settings.adult_content(),
+        );
+        self.hidden = hidden_adult_sources(&self.catalog, &local, &self.resolved);
     }
+}
+
+/// カタログの `inherit_articles` の組で、一般向けの版の記事を成人向けの版へ移す (組ごとに 1 度だけ。
+/// [`Store::inherit_articles`])。移した記事があれば `true`。
+fn inherit_editions(store: &mut Store, catalog: &Catalog) -> bool {
+    let mut moved_any = false;
+    for (general, adult) in catalog.inherited_editions() {
+        match store.inherit_articles(&general, &adult) {
+            Ok(Some(moved)) => {
+                tracing::info!("{general} の記事 {moved} 件を、成人向けの版 {adult} に移しました");
+                moved_any |= moved > 0;
+            }
+            Ok(None) => {}
+            Err(err) => tracing::error!("{general} の記事を {adult} に移せません: {err:#}"),
+        }
+    }
+    moved_any
 }
 
 /// 取得の結果などを知らせる移行の結果。起動のあとで画面に出す。
@@ -409,21 +443,19 @@ impl Services {
         let config = ConfigStore::new(paths.clone());
         let settings = config.load_settings()?;
         let secrets = config.load_secrets()?;
-        let store = Store::open(&paths.database_file())?;
+        let mut store = Store::open(&paths.database_file())?;
 
         // カタログ: 固定の取得先から取り込んだ控えがあればそれを、なければ同梱版を使う。
+        // 前の読み方で書いた控えは使わない (成人向けの取得先を一般向けとして取り込んでいたため。
+        // 同梱版から始め、起動後の取り込みで ETag を使わずに取り直す)。
         let bundled = Catalog::bundled();
         let cache = config
             .load_catalog_cache()?
-            .filter(|cache| cache.location == CATALOG_URL);
+            .filter(|cache| cache.location == CATALOG_URL && cache.is_current());
         let (catalog, catalog_status, catalog_etag) = match cache {
             Some(cache) => {
-                let files = cache
-                    .files
-                    .iter()
-                    .map(|file| (file.path.as_str(), file.text.as_str()));
                 (
-                    Catalog::from_files(files, Some(&bundled)),
+                    cache.catalog(Some(&bundled)),
                     CatalogStatus {
                         revision: cache.revision.clone(),
                         checked_at: Some(cache.fetched_at),
@@ -437,6 +469,8 @@ impl Services {
             }
             None => (bundled, CatalogStatus::default(), None),
         };
+        // 取得を始める前に、一般向けの版がこれまで成人向けの版の取得先から取得していた記事を移す。
+        inherit_editions(&mut store, &catalog);
 
         // 購読: なければ旧形式から移すか、既定のグループを on にする。
         let setup = config.initialize_subscriptions(&catalog, &settings)?;
@@ -482,6 +516,7 @@ impl Services {
             subscriptions,
             local,
             resolved: Vec::new(),
+            hidden: BTreeSet::new(),
         };
         shared.resolve();
 
@@ -497,6 +532,7 @@ impl Services {
                 running: Mutex::new(HashSet::new()),
                 permits: Mutex::new((0, Arc::new(Semaphore::new(1)))),
                 wake: Notify::new(),
+                sources_version: tokio::sync::watch::channel(0).0,
                 analysis_wake: Notify::new(),
                 last_image_prune: Mutex::new(None),
                 catalog_lock: tokio::sync::Mutex::new(()),
@@ -612,6 +648,12 @@ impl Services {
         self.0.shared.read().resolved.clone()
     }
 
+    /// 使わない成人向けのソース (同意していない・版の組が決まりに合わない)。記事を開く・通知する・
+    /// 書き出すときにも隠す。
+    pub fn hidden_sources(&self) -> BTreeSet<String> {
+        self.0.shared.read().hidden.clone()
+    }
+
     pub fn catalog(&self) -> Arc<Catalog> {
         self.0.shared.read().catalog.clone()
     }
@@ -635,9 +677,41 @@ impl Services {
 
     pub fn save_settings(&self, settings: AppSettings) -> Result<()> {
         self.0.config.save_settings(&settings)?;
-        self.0.shared.write().settings = settings;
-        self.0.wake.notify_one();
+        let adult_changed = {
+            let mut shared = self.0.shared.write();
+            let changed = shared.settings.adult_content() != settings.adult_content();
+            shared.settings = settings;
+            // 成人向けの版を使うかで、使うソースが変わる。
+            if changed {
+                shared.resolve();
+            }
+            changed
+        };
+        if adult_changed {
+            self.sources_changed();
+        } else {
+            self.0.wake.notify_one();
+        }
         Ok(())
+    }
+
+    /// 成人向けのソースを使うか (同意した時刻。`None` で使わない) を変える。
+    ///
+    /// 入れるときは、設定を保存できてから使い始める。切るときは、保存より先に使うのをやめ
+    /// (取得中のものも取り消す)、保存に失敗したら誤りを返す (そのときは次の起動で前の設定に戻る)。
+    pub fn set_adult_consent(&self, consented_at: Option<DateTime<Utc>>) -> Result<()> {
+        let mut settings = self.settings();
+        settings.adult_consented_at = consented_at;
+        if consented_at.is_some() {
+            return self.save_settings(settings);
+        }
+        {
+            let mut shared = self.0.shared.write();
+            shared.settings.adult_consented_at = None;
+            shared.resolve();
+        }
+        self.sources_changed();
+        self.0.config.save_settings(&settings)
     }
 
     /// 購読を書き換えて保存し、使うソースを決め直す。
@@ -691,6 +765,7 @@ impl Services {
     }
 
     fn sources_changed(&self) {
+        self.0.sources_version.send_modify(|version| *version += 1);
         let _ = self.0.events.send(ServiceEvent::SourcesChanged);
         self.0.wake.notify_one();
         // 本文の地域時刻 (`schedule`) が変わったソースや、on にしたソースの記事を読み直す。
@@ -760,6 +835,8 @@ impl Services {
                     etag: etag.clone(),
                     revision,
                     app_version: Some(gnn_core::source::APP_VERSION.into()),
+                    reader_version: Some(CATALOG_READER_VERSION),
+                    forced_adult: previous.forced_adult_ids(),
                     fetched_at: now,
                     files,
                 })
@@ -783,6 +860,8 @@ impl Services {
                         etag: download.etag.clone(),
                         revision: download.revision.clone(),
                         app_version: Some(gnn_core::source::APP_VERSION.into()),
+                        reader_version: Some(CATALOG_READER_VERSION),
+                        forced_adult: catalog.forced_adult_ids(),
                         fetched_at: now,
                         files: catalog
                             .files()
@@ -829,7 +908,16 @@ impl Services {
                 }
             }
         }
+        // 新しい組で、一般向けの版がこれまで成人向けの版の取得先から取得していた記事を移す。
+        let catalog = self.catalog();
+        let moved = self
+            .blocking(move |store| Ok(inherit_editions(store, &catalog)))
+            .await
+            .unwrap_or(false);
         self.sources_changed();
+        if moved {
+            let _ = self.0.events.send(ServiceEvent::EntriesMoved);
+        }
     }
 
     /// 指定したソース (省略時は on のすべて) を今すぐ取得する。
@@ -863,6 +951,22 @@ impl Services {
         let (sender, receiver) = oneshot::channel();
         let services = self.clone();
         let settings = self.settings();
+        // 成人向けのソースは、同意していなければ試さない (カタログが成人向けなら、手元の上書きで
+        // 外していても成人向け)。
+        let adult = source.adult
+            || self
+                .catalog()
+                .get(&source.id)
+                .is_some_and(|entry| entry.source.adult);
+        if adult && !settings.adult_content() {
+            let _ = sender.send(RunOutput::failed(
+                anyhow::anyhow!(
+                    "成人向けのソース (adult: true) は、設定で「成人向けのソースを使う」を有効にしてから試せます"
+                ),
+                Vec::new(),
+            ));
+            return receiver;
+        }
         let allow_private = !from_catalog
             && self
                 .sources()
@@ -1115,6 +1219,18 @@ impl Services {
             .any(|source| source.id() == id)
     }
 
+    /// `id` のソースが使うソースから外れたら終わる (成人向けのソースを使うのをやめた・ソースを消した
+    /// など)。外れていれば、すぐに終わる。
+    async fn source_removed(&self, id: &str) {
+        let mut changes = self.0.sources_version.subscribe();
+        while self.has_source(id) {
+            if changes.changed().await.is_err() {
+                // 送り手は Services と一緒にしか落ちない。
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+
     /// 取得する。取得したソースの結果と、保存期間を過ぎて消した記事の数を返す。
     async fn run_cycle_inner(&self, jobs: Vec<FetchJob>) -> (Vec<FetchOutcome>, usize) {
         let settings = self.settings();
@@ -1207,16 +1323,25 @@ impl Services {
             allow_secrets,
             trace: false,
         });
-        let output = match self
-            .unless_stopped(tokio::time::timeout(FETCH_TIMEOUT, run))
-            .await
-        {
+        // 取得中にソースが外れたら (成人向けのソースを使うのをやめたなど)、通信を取り消す。
+        let run = async {
+            tokio::select! {
+                biased;
+                () = self.source_removed(&source.id) => None,
+                output = tokio::time::timeout(FETCH_TIMEOUT, run) => Some(output),
+            }
+        };
+        let output = match self.unless_stopped(run).await {
             None => {
                 tracing::info!(source = %source.id, "終了するため、取得を取り消しました");
                 return None;
             }
-            Some(Ok(output)) => output,
-            Some(Err(_)) => RunOutput::failed(
+            Some(None) => {
+                tracing::info!(source = %source.id, "取得中にソースが外されたため、取得を取り消しました");
+                return None;
+            }
+            Some(Some(Ok(output))) => output,
+            Some(Some(Err(_))) => RunOutput::failed(
                 anyhow::anyhow!(
                     "{} 秒たっても終わらないため止めました",
                     FETCH_TIMEOUT.as_secs()
@@ -1225,8 +1350,6 @@ impl Services {
             ),
         };
 
-        let mut status = output.status;
-        let mut message = output.message.clone();
         for warning in &output.warnings {
             tracing::warn!(source = %source.id, "{warning}");
         }
@@ -1282,25 +1405,24 @@ impl Services {
                 Ok(Some((status, message, report)))
             })
             .await;
-        let report = match saved {
-            Ok(Some((saved_status, saved_message, report))) => {
-                status = saved_status;
-                message = saved_message;
-                report
-            }
+        let (status, message, report) = match saved {
+            Ok(Some(saved)) => saved,
             Ok(None) => {
+                // 取り消した取得と同じく、画像も取りに行かず、画面に終わりを知らせない。
                 tracing::info!(source = %source.id, "取得中にソースが外されたため、結果を捨てました");
-                gnn_core::ApplyReport::default()
+                return None;
             }
             Err(err) if is_stopped(&err) => {
                 tracing::info!(source = %source.id, "終了するため、取得の結果を保存せずに捨てました");
                 return None;
             }
             Err(err) => {
-                status = RunStatus::Failed;
-                message = Some(format!("保存に失敗しました: {err:#}"));
                 tracing::error!("取得結果を保存できません: {err:#}");
-                gnn_core::ApplyReport::default()
+                (
+                    RunStatus::Failed,
+                    Some(format!("保存に失敗しました: {err:#}")),
+                    gnn_core::ApplyReport::default(),
+                )
             }
         };
         if status == RunStatus::Failed {
@@ -1337,16 +1459,23 @@ impl Services {
             .0
             .events
             .send(ServiceEvent::FetchFinished(summary.clone()));
-        let added = report
-            .added
-            .into_iter()
-            .map(|NewEntry { id, title }| AddedEntry {
-                entry_id: id,
-                source_name: source.name.clone(),
-                channel: source.channel,
-                title,
-            })
-            .collect();
+        // 新着の通知に使う。初めて取得したソース (保存済みの記事がない) の記事は知らせない
+        // (on にしたばかりのゲームや、成人向けの版に切り替えたばかりの版の記事を、まとめて知らせない)。
+        let added = if known.is_empty() {
+            Vec::new()
+        } else {
+            report
+                .added
+                .into_iter()
+                .map(|NewEntry { id, title }| AddedEntry {
+                    entry_id: id,
+                    source_id: source.id.clone(),
+                    source_name: source.name.clone(),
+                    channel: source.channel,
+                    title,
+                })
+                .collect()
+        };
         Some(FetchOutcome {
             summary,
             added,
@@ -1473,13 +1602,17 @@ impl Services {
             }
         }
         if let Some(dir) = settings.legacy_export_dir.clone() {
+            // 使わない成人向けのソースの記事と予定は書き出さない。
+            let hidden = self.hidden_sources();
             let result = self
                 .blocking(move |store| -> Result<()> {
-                    let rows = store.legacy_rows()?;
+                    let mut rows = store.legacy_rows()?;
+                    rows.retain(|(source_id, _)| !hidden.contains(source_id));
                     // 旧アプリの「今日・明日」の並べ替え用の日付は、予定の表から作る。
                     let now = Utc::now();
-                    let items =
+                    let mut items =
                         store.agenda(None, now - agenda::LOAD_BEHIND, now + agenda::LOAD_AHEAD)?;
+                    items.retain(|item| !hidden.contains(&item.source_id));
                     let dates = legacy_dates(&items);
                     gnn_core::legacy::write_jsonl(&dir.join("game_info.jsonl"), &rows, &dates)
                 })
@@ -2922,6 +3055,8 @@ mod tests {
                 etag: Some("foreign-etag".into()),
                 revision: Some("foreign-revision".into()),
                 app_version: Some(gnn_core::source::APP_VERSION.into()),
+                reader_version: Some(CATALOG_READER_VERSION),
+                forced_adult: Vec::new(),
                 fetched_at: Utc::now(),
                 files: Vec::new(),
             })
@@ -2934,6 +3069,55 @@ mod tests {
         );
         assert_eq!(services.catalog_status(), CatalogStatus::default());
         assert!(services.0.shared.read().catalog_etag.is_none());
+    }
+
+    #[test]
+    fn startup_uses_only_caches_of_the_current_reader_and_keeps_forced_adult_sources() {
+        let bundled = Catalog::bundled();
+        let first = bundled.entries()[0].clone();
+        let cache = |reader_version: Option<u32>, forced_adult: Vec<String>| CatalogCache {
+            location: CATALOG_URL.into(),
+            etag: Some("cached-etag".into()),
+            revision: Some("cached-revision".into()),
+            app_version: Some(gnn_core::source::APP_VERSION.into()),
+            reader_version,
+            forced_adult,
+            fetched_at: Utc::now(),
+            // 控えには 1 つ目のソースしかない。
+            files: bundled
+                .files()
+                .into_iter()
+                .filter(|(path, _)| path == gnn_core::catalog::GROUPS_FILE || *path == first.path)
+                .map(|(path, text)| CachedFile { path, text })
+                .collect(),
+        };
+        let start = |cache: CatalogCache| {
+            let dir = tempfile::tempdir().unwrap();
+            let paths = AppPaths::under(dir.path().join("home"));
+            paths.ensure().unwrap();
+            ConfigStore::new(paths.clone())
+                .save_catalog_cache(&cache)
+                .unwrap();
+            let (sender, _) = flume::unbounded();
+            let (services, _) = Services::start(paths, sender).unwrap();
+            (dir, services)
+        };
+        // 前の読み方で書いた控えは使わず、同梱版から始めて ETag なしで取り直す。
+        let (_dir, services) = start(cache(None, Vec::new()));
+        assert_eq!(services.catalog().entries().len(), bundled.entries().len());
+        assert!(services.0.shared.read().catalog_etag.is_none());
+        // 今の読み方の控えは使い、成人向けとして扱う印も戻す (同意していないので使わない)。
+        let (_dir, services) = start(cache(
+            Some(CATALOG_READER_VERSION),
+            vec![first.source.id.clone()],
+        ));
+        assert_eq!(services.catalog().entries().len(), 1);
+        assert!(services.catalog().entries()[0].source.adult);
+        assert!(services.sources().is_empty());
+        assert_eq!(
+            services.0.shared.read().catalog_etag.as_deref(),
+            Some("cached-etag")
+        );
     }
 
     /// 通信しないサービス。カタログの取得は通信せずに失敗させ、ソースはすべて off にする。
@@ -3631,8 +3815,14 @@ mod tests {
     #[test]
     fn catalog_sources_are_public_only_without_secrets() {
         let catalog = Catalog::bundled();
-        let id = catalog.entries()[0].source.id.clone();
-        let mut local = catalog.entries()[1].source.clone();
+        // 成人向けのソースは同意していないと入らないので、一般向けのソースで確かめる。
+        let general: Vec<&gnn_core::catalog::CatalogEntry> = catalog
+            .entries()
+            .iter()
+            .filter(|entry| !entry.source.adult)
+            .collect();
+        let id = general[0].source.id.clone();
+        let mut local = general[1].source.clone();
         local.id = "mine".into();
         let subscriptions = Subscriptions {
             items: vec![
@@ -3646,7 +3836,7 @@ mod tests {
                 },
             ],
         };
-        let resolved = resolve(&catalog, &subscriptions, &[local]);
+        let resolved = resolve(&catalog, &subscriptions, &[local], false);
         let catalog_source = resolved.iter().find(|source| source.id() == id).unwrap();
         assert_eq!(
             fetch_permissions(catalog_source),

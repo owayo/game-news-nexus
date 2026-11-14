@@ -19,7 +19,6 @@ use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputSt
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, WindowExt as _,
     h_flex, v_flex,
@@ -34,9 +33,10 @@ use serde_json::Value;
 
 use crate::state::AppState;
 use crate::ui::components::{
-    Badge, BadgeTone, FormRow, RunResult, SectionLabel, SourceAvatar, StatusIcon,
+    Badge, BadgeTone, Card, FormRow, RunResult, SourceAvatar, StatusIcon, segmented,
 };
 use crate::ui::icon_cropper::pick_and_crop;
+use crate::ui::theme::Palette;
 
 /// 編集画面から一覧への知らせ。
 #[derive(Debug, Clone)]
@@ -100,10 +100,27 @@ struct Field {
 }
 
 struct Section {
+    kind: SectionKind,
     title: String,
+    description: &'static str,
     fields: Vec<Field>,
     /// 一覧の区切りなら、その番号。
     list: Option<usize>,
+}
+
+/// フォームのまとまり。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SectionKind {
+    /// 名前・ID・アイコン・公式サイト・説明。
+    Basic,
+    /// 一覧の取得 (一覧ごと)。
+    List,
+    /// 記事本文 (詳細ページと本文の整形)。
+    Body,
+    /// 予定の読み取り。
+    Schedule,
+    /// 詳細設定 (取得の間隔・期間・件数・タイムゾーン、手元のネットワーク)。
+    Advanced,
 }
 
 const KINDS: &[(&str, &str)] = &[
@@ -554,8 +571,11 @@ impl SourceEditor {
                 },
             );
         }
+        basic.extend(place("", DISPLAY));
         sections.push(Section {
+            kind: SectionKind::Basic,
             title: "基本".into(),
+            description: "名前と、画面に出すアイコン・公式サイト・説明。",
             fields: basic,
             list: None,
         });
@@ -589,7 +609,9 @@ impl SourceEditor {
                 .map(|name| format!("「{name}」"))
                 .unwrap_or_default();
             sections.push(Section {
-                title: format!("一覧 {}{name}", index + 1),
+                kind: SectionKind::List,
+                title: format!("一覧の取得 {}{name}", index + 1),
+                description: "記事の一覧を取る URL と、記事 1 件ずつの読み方。",
                 fields,
                 list: Some(index),
             });
@@ -615,23 +637,28 @@ impl SourceEditor {
             }
             _ => {}
         }
+        detail.extend(place("", BODY));
         sections.push(Section {
-            title: "記事の詳細".into(),
+            kind: SectionKind::Body,
+            title: "記事本文".into(),
+            description: "一覧で本文が取れないときの詳細ページと、本文の整え方。",
             fields: detail,
             list: None,
         });
-        for (title, defs) in [
-            ("本文の整形", BODY),
-            ("取得の設定", SCHEDULE),
-            ("予定の読み取り", SCHEDULE_READING),
-            ("表示", DISPLAY),
-        ] {
-            sections.push(Section {
-                title: title.into(),
-                fields: place("", defs),
-                list: None,
-            });
-        }
+        sections.push(Section {
+            kind: SectionKind::Schedule,
+            title: "予定の読み取り".into(),
+            description: "本文のメンテナンスなどの日時を、どの地域の時刻として読むか。",
+            fields: place("", SCHEDULE_READING),
+            list: None,
+        });
+        sections.push(Section {
+            kind: SectionKind::Advanced,
+            title: "詳細設定".into(),
+            description: "取得の間隔・期間・件数と、投稿日時のタイムゾーン。",
+            fields: place("", SCHEDULE),
+            list: None,
+        });
         sections
     }
 
@@ -759,6 +786,26 @@ impl SourceEditor {
             Ok(config) => {
                 self.parse_error = None;
                 self.issues = gnn_fetch::validate(&config);
+                // 成人向けの版と一般向けの版の組は、カタログの定義で決める (手元では作れない・変えられない)。
+                if let Some(general) = &config.general_edition {
+                    let app = self.app.read(cx);
+                    let message = match app.catalog().get(&config.id) {
+                        None => Some(
+                            "手元だけのソースでは使えません (成人向けの版と一般向けの版の組は、カタログの定義で決めます)"
+                                .to_string(),
+                        ),
+                        Some(entry) if entry.source.general_edition.as_deref() != Some(general) => {
+                            Some("版の組はカタログの定義で決まります。カタログと同じにするか、消してください".to_string())
+                        }
+                        Some(_) => None,
+                    };
+                    if let Some(message) = message {
+                        self.issues.push(ConfigIssue {
+                            field: "general_edition".into(),
+                            message,
+                        });
+                    }
+                }
                 if self.is_new() {
                     let app = self.app.read(cx);
                     if app.catalog().get(&config.id).is_some()
@@ -899,16 +946,32 @@ impl SourceEditor {
         Some((config, text))
     }
 
-    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// 保存していない変更があるか。
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// 確かめるときに出す名前。
+    pub fn display_name(&self) -> String {
+        get(&self.draft, "name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .map(str::to_string)
+            .or_else(|| self.source_id())
+            .unwrap_or_else(|| "名前のないソース".to_string())
+    }
+
+    /// 保存する。保存できたら `true` (誤りがあるときは知らせて `false`)。
+    pub fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let Some((config, text)) = self.current(window, cx) else {
-            return;
+            return false;
         };
         if self.has_errors() {
             window.push_notification(
                 Notification::error("設定に誤りがあるため保存できません"),
                 cx,
             );
-            return;
+            return false;
         }
         let id = config.id.clone();
         let is_new = self.is_new();
@@ -930,10 +993,12 @@ impl SourceEditor {
                 window.push_notification(Notification::success("保存しました"), cx);
                 cx.emit(EditorEvent::Saved(id));
                 cx.notify();
+                true
             }
             Err(err) => {
                 window
                     .push_notification(Notification::error(format!("保存できません: {err:#}")), cx);
+                false
             }
         }
     }
@@ -1197,66 +1262,101 @@ impl SourceEditor {
         let list_count = self.list_count();
         let has_comments = self.form_touched && has_comments(&self.yaml_text_for_comments());
         let other_issues = self.other_issues();
+        let is_new = self.is_new();
+        let id = self.source_id().unwrap_or_default();
+        let allow_private = self
+            .app
+            .read(cx)
+            .resolved(&id)
+            .is_some_and(|source| source.allow_private_network);
         v_flex()
-            .gap_3()
+            .gap_5()
             .when(has_comments, |this| {
                 this.child(
-                    div()
+                    h_flex()
+                        .gap_2()
+                        .p_3()
+                        .rounded(px(8.))
+                        .bg(theme.warning.opacity(0.1))
                         .text_xs()
-                        .text_color(theme.warning)
+                        .text_color(theme.foreground)
+                        .child(Icon::new(IconName::TriangleAlert).small().text_color(theme.warning))
                         .child("フォームで値を変えたため、保存すると YAML の中のコメントは消えます。コメントを残すなら YAML タブで直してください。"),
                 )
             })
             .children(self.layout().into_iter().map(|section| {
-                let header = h_flex()
-                    .gap_2()
-                    .justify_between()
-                    .child(SectionLabel::new(section.title.clone()))
-                    .when_some(section.list.filter(|_| list_count > 1), |this, index| {
-                        this.child(
-                            Button::new(SharedString::from(format!("remove-list-{index}")))
-                                .xsmall()
-                                .ghost()
-                                .icon(IconName::Trash)
-                                .label("この一覧を消す")
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.remove_list(index, window, cx)
+                let is_last_list = section.list == Some(list_count.saturating_sub(1));
+                let mut card = Card::new()
+                    .title(section.title.clone())
+                    .description(section.description);
+                if let Some(index) = section.list.filter(|_| list_count > 1) {
+                    card = card.action(
+                        Button::new(SharedString::from(format!("remove-list-{index}")))
+                            .xsmall()
+                            .ghost()
+                            .icon(IconName::Trash)
+                            .label("この一覧を消す")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.remove_list(index, window, cx)
+                            })),
+                    );
+                }
+                card.children(
+                    section
+                        .fields
+                        .iter()
+                        .map(|field| self.render_field(field, cx))
+                        .collect::<Vec<_>>(),
+                )
+                .when(section.kind == SectionKind::Basic, |this| {
+                    this.child(self.render_local_icon(cx))
+                })
+                .when(section.kind == SectionKind::List && is_last_list, |this| {
+                    this.child(
+                        h_flex().child(
+                            Button::new("add-list")
+                                .small()
+                                .outline()
+                                .icon(IconName::Plus)
+                                .label("一覧を足す")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.add_list(window, cx)
+                                })),
+                        ),
+                    )
+                })
+                .when(section.kind == SectionKind::Advanced && !is_new, |this| {
+                    let id = id.clone();
+                    this.child(
+                        FormRow::new(
+                            "手元のネットワーク",
+                            Switch::new("editor-allow-private")
+                                .small()
+                                .label("localhost・LAN への取得を許す")
+                                .checked(allow_private)
+                                .on_click(cx.listener(move |this, checked: &bool, window, cx| {
+                                    let result = this.app.update(cx, |app, cx| {
+                                        app.set_allow_private_network(&id, *checked, cx)
+                                    });
+                                    if let Err(err) = result {
+                                        window.push_notification(
+                                            Notification::error(format!("{err:#}")),
+                                            cx,
+                                        );
+                                    }
                                 })),
                         )
-                    });
-                let is_last_list = section.list == Some(list_count.saturating_sub(1));
-                v_flex()
-                    .gap_3()
-                    .child(header)
-                    .children(
-                        section
-                            .fields
-                            .iter()
-                            .map(|field| self.render_field(field, cx))
-                            .collect::<Vec<_>>(),
+                        .help("手元のサーバーから取得するときだけ許してください。許すとシステムのプロキシも使います。"),
                     )
-                    .when(section.title == "表示", |this| {
-                        this.child(self.render_local_icon(cx))
-                    })
-                    .when(is_last_list, |this| {
-                        this.child(
-                            h_flex().child(
-                                Button::new("add-list")
-                                    .small()
-                                    .outline()
-                                    .icon(IconName::Plus)
-                                    .label("一覧を足す")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.add_list(window, cx)
-                                    })),
-                            ),
-                        )
-                    })
+                })
             }))
             .when(!other_issues.is_empty(), |this| {
                 this.child(
                     v_flex()
                         .gap_1()
+                        .p_3()
+                        .rounded(px(8.))
+                        .bg(theme.danger.opacity(0.08))
                         .text_xs()
                         .text_color(theme.danger)
                         .children(other_issues.into_iter().map(|issue| div().child(issue))),
@@ -1265,6 +1365,7 @@ impl SourceEditor {
             .child(
                 div()
                     .text_xs()
+                    .line_height(px(18.))
                     .text_color(theme.muted_foreground)
                     .child("事前の取得 (prepare)・ヘッダ・問い合わせ・置換 (body.replace)・画像の同一性 (url_identity) は「YAML」タブで書けます。書き方は game-news-nexus-config の CONTRIBUTING.md を参照してください。"),
             )
@@ -1279,22 +1380,34 @@ impl SourceEditor {
             .unwrap_or_default()
     }
 
+    /// YAML のタブ。エディタが残りの高さを使う。
     fn render_yaml(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
         v_flex()
+            .size_full()
             .gap_2()
-            .h(px(560.))
+            .px_6()
+            .py_4()
             .when_some(self.yaml_error.clone(), |this, error| {
-                this.child(div().text_xs().text_color(cx.theme().danger).child(error))
+                this.child(
+                    h_flex()
+                        .gap_1()
+                        .text_xs()
+                        .text_color(theme.danger)
+                        .child(Icon::new(IconName::CircleAlert).xsmall())
+                        .child(error),
+                )
             })
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .border_1()
-                    .border_color(cx.theme().border)
-                    .rounded(cx.theme().radius)
-                    .font_family(cx.theme().mono_font_family.clone())
-                    .text_size(cx.theme().mono_font_size)
+                    .border_color(theme.border)
+                    .rounded(px(8.))
+                    .overflow_hidden()
+                    .font_family(theme.mono_font_family.clone())
+                    .text_size(theme.mono_font_size)
                     .child(
                         Editor::new(&self.yaml_editor)
                             .h(relative(1.))
@@ -1304,7 +1417,7 @@ impl SourceEditor {
             .child(
                 div()
                     .text_xs()
-                    .text_color(cx.theme().muted_foreground)
+                    .text_color(theme.muted_foreground)
                     .child("文字列は単一引用符で囲みます。フォームに戻ると内容を読み込みます。"),
             )
             .into_any_element()
@@ -1331,12 +1444,21 @@ impl SourceEditor {
 
 impl Render for SourceEditor {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
+        let theme = cx.theme().clone();
         let app = self.app.read(cx);
         let name = get(&self.draft, "name")
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
+        let local_icon = app
+            .subscriptions()
+            .get(&self.source_id().unwrap_or_default())
+            .and_then(|item| item.icon.clone());
+        let icon = local_icon.or_else(|| {
+            get(&self.draft, "icon")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
         let kind_label = parse_draft(&self.draft)
             .ok()
             .map(|config| config.kind_label());
@@ -1345,13 +1467,12 @@ impl Render for SourceEditor {
         let state = app.state_of(&id).cloned();
         let running = app.is_running(&id);
         let enabled = resolved.as_ref().is_none_or(|source| source.enabled);
-        let allow_private = resolved
-            .as_ref()
-            .is_some_and(|source| source.allow_private_network);
         let is_new = self.is_new();
         let can_save = self.dirty && (self.tab == EditorTab::Yaml || !self.has_errors());
         let testing = matches!(self.test, TestState::Running);
         let mode = self.current_mode(cx);
+        let error_count =
+            self.issues.len() + self.input_errors.len() + usize::from(self.parse_error.is_some());
 
         let status_line = match &state {
             Some(state) => format!(
@@ -1364,23 +1485,36 @@ impl Render for SourceEditor {
                     .map(|message| format!(" · {message}"))
                     .unwrap_or_default()
             ),
-            None if is_new => "未保存".to_string(),
+            None if is_new => "まだ保存していません".to_string(),
             None => StatusIcon::label(None, running, enabled).to_string(),
         };
 
-        v_flex()
-            .size_full()
+        let header = h_flex()
+            .flex_none()
+            .gap_4()
+            .px_6()
+            .pt_5()
+            .pb_4()
+            .child(
+                SourceAvatar::new(
+                    if name.is_empty() {
+                        "?".to_string()
+                    } else {
+                        name.clone()
+                    },
+                    icon,
+                )
+                .large(),
+            )
             .child(
                 v_flex()
-                    .gap_2()
-                    .px_4()
-                    .py_3()
-                    .border_b_1()
-                    .border_color(theme.border)
+                    .flex_1()
+                    .min_w_0()
+                    .gap_1()
                     .child(
                         h_flex()
                             .gap_2()
-                            .child(div().text_lg().font_semibold().truncate().child(
+                            .child(div().text_xl().font_semibold().truncate().child(
                                 if name.is_empty() {
                                     "名前のないソース".to_string()
                                 } else {
@@ -1389,23 +1523,17 @@ impl Render for SourceEditor {
                             ))
                             .child(match mode {
                                 EditorMode::Override => {
-                                    Badge::new("カタログを手元で上書き").tone(BadgeTone::Accent)
+                                    Badge::new("自分用に変更").tone(BadgeTone::Accent)
                                 }
-                                _ => Badge::new("手元のソース"),
+                                EditorMode::Local => Badge::new("自作"),
+                                EditorMode::New => Badge::new("新規"),
                             })
-                            .when_some(kind_label, |this, label| {
-                                this.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child(label),
-                                )
-                            }),
+                            .when_some(kind_label, |this, label| this.child(Badge::new(label))),
                     )
                     .child(
                         h_flex()
-                            .gap_2()
-                            .text_xs()
+                            .gap_1()
+                            .text_sm()
                             .text_color(theme.muted_foreground)
                             .child(StatusIcon::new(
                                 state.as_ref().and_then(|state| state.last_status),
@@ -1413,133 +1541,193 @@ impl Render for SourceEditor {
                                 enabled,
                             ))
                             .child(div().truncate().child(status_line)),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .flex_wrap()
-                            .child(
-                                Button::new("editor-save")
-                                    .small()
-                                    .primary()
-                                    .icon(IconName::Save)
-                                    .label(if is_new { "追加" } else { "保存" })
-                                    .disabled(!can_save)
-                                    .on_click(
-                                        cx.listener(|this, _, window, cx| this.save(window, cx)),
-                                    ),
-                            )
-                            .child(
-                                Button::new("editor-test")
+                    ),
+            )
+            .when(!is_new, |this| {
+                this.child(
+                    h_flex()
+                        .flex_none()
+                        .gap_2()
+                        .when(enabled, |this| {
+                            this.child(
+                                Button::new("editor-fetch")
                                     .small()
                                     .outline()
-                                    .icon(IconName::FlaskConical)
-                                    .label("テスト取得")
-                                    .loading(testing)
-                                    .on_click(
-                                        cx.listener(|this, _, window, cx| {
-                                            this.run_test(window, cx)
-                                        }),
-                                    ),
+                                    .icon(IconName::RefreshCw)
+                                    .label("このゲームを取得")
+                                    .loading(running)
+                                    .tooltip("保存した定義で今すぐ取得する")
+                                    .on_click(cx.listener(|this, _, _, cx| this.fetch_now(cx))),
                             )
-                            .when(!is_new && enabled, |this| {
-                                this.child(
-                                    Button::new("editor-fetch")
-                                        .small()
-                                        .ghost()
-                                        .icon(IconName::RefreshCw)
-                                        .label("今すぐ取得")
-                                        .loading(running)
-                                        .on_click(cx.listener(|this, _, _, cx| this.fetch_now(cx))),
-                                )
-                            })
-                            .when(!is_new, |this| {
-                                this.child(
-                                    Button::new("editor-revert")
-                                        .small()
-                                        .ghost()
-                                        .icon(IconName::Undo2)
-                                        .label("元に戻す")
-                                        .disabled(!self.dirty)
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.revert(window, cx)
-                                        })),
-                                )
-                                .child(
-                                    Button::new("editor-delete")
-                                        .small()
-                                        .ghost()
-                                        .icon(if mode == EditorMode::Override {
-                                            IconName::Undo2
-                                        } else {
-                                            IconName::Trash
-                                        })
-                                        .label(if mode == EditorMode::Override {
-                                            "カタログの定義に戻す"
-                                        } else {
-                                            "削除"
-                                        })
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.confirm_delete(window, cx)
-                                        })),
-                                )
-                            }),
-                    )
-                    .when(!is_new, |this| {
-                        let id = id.clone();
-                        this.child(
-                            Switch::new("editor-allow-private")
+                        })
+                        .child(
+                            Button::new("editor-delete")
                                 .small()
-                                .label("手元のネットワーク (localhost・LAN) への取得を許す")
-                                .checked(allow_private)
-                                .on_click(cx.listener(move |this, checked: &bool, window, cx| {
-                                    let result = this.app.update(cx, |app, cx| {
-                                        app.set_allow_private_network(&id, *checked, cx)
-                                    });
-                                    if let Err(err) = result {
-                                        window.push_notification(
-                                            Notification::error(format!("{err:#}")),
-                                            cx,
-                                        );
-                                    }
+                                .ghost()
+                                .icon(if mode == EditorMode::Override {
+                                    IconName::Undo2
+                                } else {
+                                    IconName::Trash
+                                })
+                                .label(if mode == EditorMode::Override {
+                                    "カタログの定義に戻す"
+                                } else {
+                                    "削除"
+                                })
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.confirm_delete(window, cx)
                                 })),
-                        )
+                        ),
+                )
+            });
+
+        let tabs = h_flex()
+            .flex_none()
+            .gap_3()
+            .px_6()
+            .pb_3()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(segmented(
+                "editor-tabs",
+                &["フォーム", "YAML"],
+                match self.tab {
+                    EditorTab::Form => 0,
+                    EditorTab::Yaml => 1,
+                },
+                cx.listener(|this, index: &usize, window, cx| {
+                    let tab = if *index == 0 {
+                        EditorTab::Form
+                    } else {
+                        EditorTab::Yaml
+                    };
+                    this.switch_tab(tab, window, cx);
+                }),
+            ))
+            .when_some(self.parse_error.clone(), |this, error| {
+                this.child(
+                    h_flex()
+                        .min_w_0()
+                        .gap_1()
+                        .text_xs()
+                        .text_color(theme.danger)
+                        .child(Icon::new(IconName::CircleAlert).xsmall())
+                        .child(div().truncate().child(error)),
+                )
+            });
+
+        let test = self.render_test(cx);
+        let content: AnyElement = match self.tab {
+            EditorTab::Form => div()
+                .id("editor-scroll")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scrollbar()
+                .child(
+                    v_flex()
+                        .w_full()
+                        .max_w(px(880.))
+                        .gap_5()
+                        .px_6()
+                        .py_5()
+                        .children(test)
+                        .child(self.render_form(cx)),
+                )
+                .into_any_element(),
+            EditorTab::Yaml => v_flex()
+                .flex_1()
+                .min_h_0()
+                .when_some(test, |this, test| {
+                    this.child(
+                        div()
+                            .id("editor-test-scroll")
+                            .flex_none()
+                            .max_h(px(240.))
+                            .overflow_y_scrollbar()
+                            .px_6()
+                            .pt_4()
+                            .child(test),
+                    )
+                })
+                .child(div().flex_1().min_h_0().child(self.render_yaml(cx)))
+                .into_any_element(),
+        };
+
+        // 保存の帯。保存だけを主ボタンにし、未保存の変更と誤りの数をいつも見えるところに出す。
+        let save_bar = h_flex()
+            .flex_none()
+            .h(px(52.))
+            .gap_3()
+            .px_6()
+            .border_t_1()
+            .border_color(theme.border)
+            .bg(Palette::of(cx).surface)
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap_3()
+                    .text_sm()
+                    .child(if self.dirty {
+                        h_flex()
+                            .gap_1p5()
+                            .child(div().size(px(8.)).rounded_full().bg(theme.warning))
+                            .child("未保存の変更があります")
+                    } else {
+                        h_flex()
+                            .gap_1p5()
+                            .text_color(theme.muted_foreground)
+                            .child(Icon::new(IconName::Check).small())
+                            .child("保存済み")
                     })
-                    .when_some(self.parse_error.clone(), |this, error| {
-                        this.child(div().text_xs().text_color(theme.danger).child(error))
+                    .when(error_count > 0, |this| {
+                        this.child(
+                            h_flex()
+                                .gap_1()
+                                .text_color(theme.danger)
+                                .child(Icon::new(IconName::CircleAlert).small())
+                                .child(format!("誤り {error_count} 件")),
+                        )
                     }),
             )
+            .when(!is_new, |this| {
+                this.child(
+                    Button::new("editor-revert")
+                        .small()
+                        .ghost()
+                        .label("未保存の変更を破棄")
+                        .disabled(!self.dirty)
+                        .on_click(cx.listener(|this, _, window, cx| this.revert(window, cx))),
+                )
+            })
             .child(
-                TabBar::new("editor-tabs")
+                Button::new("editor-test")
                     .small()
-                    .selected_index(match self.tab {
-                        EditorTab::Form => 0,
-                        EditorTab::Yaml => 1,
-                    })
-                    .child(Tab::new().label("フォーム"))
-                    .child(Tab::new().label("YAML"))
-                    .on_click(cx.listener(|this, index: &usize, window, cx| {
-                        let tab = if *index == 0 {
-                            EditorTab::Form
-                        } else {
-                            EditorTab::Yaml
-                        };
-                        this.switch_tab(tab, window, cx);
-                    })),
+                    .outline()
+                    .icon(IconName::FlaskConical)
+                    .label("編集中の定義をテスト")
+                    .loading(testing)
+                    .tooltip("保存していない変更も含めて、先頭の 5 件を取得してみる")
+                    .on_click(cx.listener(|this, _, window, cx| this.run_test(window, cx))),
             )
             .child(
-                div()
-                    .id("editor-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scrollbar()
-                    .child(v_flex().gap_4().p_4().children(self.render_test(cx)).child(
-                        match self.tab {
-                            EditorTab::Form => self.render_form(cx),
-                            EditorTab::Yaml => self.render_yaml(cx),
-                        },
-                    )),
-            )
+                Button::new("editor-save")
+                    .small()
+                    .primary()
+                    .icon(IconName::Save)
+                    .label(if is_new { "追加" } else { "保存" })
+                    .disabled(!can_save)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.save(window, cx);
+                    })),
+            );
+
+        v_flex()
+            .size_full()
+            .child(header)
+            .child(tabs)
+            .child(content)
+            .child(save_bar)
     }
 }
 

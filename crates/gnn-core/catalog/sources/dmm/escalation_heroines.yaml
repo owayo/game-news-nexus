@@ -1,9 +1,10 @@
-# エスカレーションヒロインズ
+# エスカレーションヒロインズ (FANZA GAMES だけの作品)
 # yaml-language-server: $schema=../../schema/source.schema.json
 schema: 2
 min_app_version: '26.11.6'
 id: escalation_heroines
 name: エスカレーションヒロインズ
+adult: true
 tags:
   - dmm
 lists:

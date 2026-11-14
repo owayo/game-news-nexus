@@ -1,0 +1,34 @@
+# Twinkle☆Star Knights X (Twinkle☆Star Knights の FANZA GAMES 版。一般版は twinkle_star_knights)
+# yaml-language-server: $schema=../../schema/source.schema.json
+schema: 2
+min_app_version: '26.11.6'
+id: twinkle_star_knights_r18
+name: 'Twinkle☆Star Knights X'
+adult: true
+general_edition: twinkle_star_knights
+inherit_articles: true
+tags:
+  - dmm
+lists:
+  - kind: html
+    request:
+      url: 'https://prod-dmmpcr.twinkle-star-knights.com/proxy/bottom/info/list/allInfo'
+    items: '#navi_info_wrap ul.navi_info_inner_list > li'
+    fields:
+      url:
+        selector: 'div[data-detail_url]'
+        attr: data-detail_url
+      published: '.list_date'
+detail:
+  kind: html
+  fields:
+    title: h2
+    body:
+      remove:
+        - h2
+        - '.infoblock_date'
+# 本文の画像には取得した時刻のキャッシュ破り (t) が付く (外しても取れる)。同じ画像として扱う。
+url_identity:
+  images:
+    - origin: 'https://dz87n5pasv7ep.cloudfront.net'
+      ignore_query: ['t']

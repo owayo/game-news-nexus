@@ -17,7 +17,7 @@ use gpui_kit::{
 
 use crate::shortcut::APP_NAME;
 use crate::ui::actions::{
-    CloseWindow, FocusSearch, Quit, Refresh, ShowNews, ShowSettings, ShowSources,
+    CloseWindow, FocusSearch, Quit, Refresh, ShowAgenda, ShowNews, ShowSettings, ShowSources,
 };
 
 gpui_kit::actions!(gnn_macos, [Hide, HideOthers, ShowAll, Minimize, Zoom]);
@@ -99,11 +99,12 @@ fn menus() -> Vec<Menu> {
             MenuItem::os_action("すべてを選択", input::SelectAll, OsAction::SelectAll),
         ]),
         Menu::new("表示").items([
-            MenuItem::action("ニュース", ShowNews),
+            MenuItem::action("お知らせ", ShowNews),
+            MenuItem::action("今日の予定", ShowAgenda),
             MenuItem::action("ソース", ShowSources),
             MenuItem::separator(),
             MenuItem::action("検索", FocusSearch),
-            MenuItem::action("今すぐ取得", Refresh),
+            MenuItem::action("すべて取得", Refresh),
         ]),
         // gpui は名前が "Window" のメニューだけを OS のウインドウメニューにする (ウインドウの
         // 一覧が付く)。ウインドウは 1 つなので、日本語の名前のまま普通のメニューとして置く。

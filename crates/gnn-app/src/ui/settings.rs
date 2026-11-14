@@ -1,18 +1,24 @@
-//! アプリの設定。取得間隔・カタログ・常駐・通知・表示・旧形式との連携。
+//! アプリの設定。表示・自動取得・常駐と通知・記事の保存・カタログ・詳細をカードに分け、各行は
+//! 左に説明、右に操作で統一する (狭いときは操作を説明の下に置く)。変更はすぐに保存する。
+//!
+//! ゲームのアイコンはソース画面で変える (設定にゲームの一覧をもう 1 つ置かない)。
 
 use std::path::PathBuf;
 
+use chrono::{Local, Utc};
 use gnn_core::catalog::{CATALOG_REPOSITORY, ProblemKind};
 use gnn_core::{AppSettings, ThemePreference};
 use gpui_kit::assets::IconName;
+use gpui_kit::component::StyledExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _, WindowExt as _, h_flex,
-    v_flex,
+    ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -22,10 +28,27 @@ use gpui_kit::{
 };
 
 use crate::state::AppState;
-use crate::ui::components::{FormRow, PageHeader, SectionLabel, SourceAvatar, open_web_url};
-use crate::ui::icon_cropper::pick_and_crop;
+use crate::ui::components::{AppLogo, Card, PageHeader, SettingRow, open_web_url, segmented};
 
-#[derive(Debug, Clone, Copy)]
+/// 取得の間隔の選択肢 (分)。ほかの値は「カスタム」で分を入れる。
+const INTERVALS: [(u32, &str); 6] = [
+    (30, "30 分"),
+    (60, "1 時間"),
+    (180, "3 時間"),
+    (360, "6 時間"),
+    (720, "12 時間"),
+    (1440, "24 時間"),
+];
+
+/// 選択肢の名前。選択肢になければ `None`。
+fn interval_label(minutes: u32) -> Option<&'static str> {
+    INTERVALS
+        .iter()
+        .find(|(value, _)| *value == minutes)
+        .map(|(_, label)| *label)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NumberField {
     Interval,
     MaxAge,
@@ -66,34 +89,30 @@ impl NumberField {
         Ok(())
     }
 
-    fn label(self) -> &'static str {
+    /// 入力欄の後ろに出す単位。
+    fn unit(self) -> &'static str {
         match self {
-            NumberField::Interval => "取得間隔 (分)",
-            NumberField::MaxAge => "取り込む期間 (日)",
-            NumberField::Retention => "記事を残す日数",
-            NumberField::Concurrency => "同時に取得するソースの数",
-        }
-    }
-
-    fn help(self) -> &'static str {
-        match self {
-            NumberField::Interval => {
-                "ソースごとの設定がなければこの間隔で取得します。失敗が続くソースは間隔を延ばします。"
-            }
-            NumberField::MaxAge => "これより古い記事は取り込みません。0 で無制限。",
-            NumberField::Retention => "これより古いお知らせを消します。0 なら消しません。",
-            NumberField::Concurrency => "同じサイトへの同時接続は別に 2 本までに抑えています。",
+            NumberField::Interval => "分",
+            NumberField::MaxAge | NumberField::Retention => "日",
+            NumberField::Concurrency => "件",
         }
     }
 }
 
+/// 成人向けの版を入れる確認で、何を出すようになるかの説明。
+const ADULT_CONSENT_TEXT: &str = "FANZA GAMES の成人向けの版のお知らせを取得して表示します。お知らせの文章や画像には、性的な表現が含まれることがあります。";
+
 pub struct SettingsPage {
     app: Entity<AppState>,
-    /// 自動起動の状態。レジストリが正本なので、開いたときと切り替えたときに読む。
+    /// 自動起動の状態。レジストリ (macOS は LaunchAgent) が正本なので、開いたときと切り替えたときに読む。
     autostart: bool,
     numbers: Vec<(NumberField, Entity<InputState>)>,
     export_dir: Entity<InputState>,
-    errors: Vec<(usize, &'static str)>,
+    errors: Vec<(NumberField, &'static str)>,
+    /// 取得の間隔を分で入れているか (選択肢にない値か、「カスタム」を選んだ)。
+    custom_interval: bool,
+    /// 成人向けの版を入れる確認で、「18 歳以上です」に印を付けたか。確認を開くたびに外す。
+    adult_age_confirmed: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -102,7 +121,7 @@ impl SettingsPage {
         let settings = app.read(cx).settings().clone();
         let mut subscriptions = vec![cx.observe(&app, |_, _, cx| cx.notify())];
         let mut numbers = Vec::new();
-        for (index, field) in NumberField::ALL.into_iter().enumerate() {
+        for field in NumberField::ALL {
             let value = field.read(&settings).to_string();
             let state = cx.new(|cx| InputState::new(window, cx).default_value(value));
             subscriptions.push(cx.subscribe_in(
@@ -111,7 +130,7 @@ impl SettingsPage {
                 move |this, state, event, _, cx| {
                     if matches!(event, InputEvent::Change) {
                         let text = state.read(cx).value().to_string();
-                        this.apply_number(index, field, &text, cx);
+                        this.apply_number(field, &text, cx);
                     }
                 },
             ));
@@ -144,6 +163,8 @@ impl SettingsPage {
             numbers,
             export_dir,
             errors: Vec::new(),
+            custom_interval: interval_label(settings.interval_minutes).is_none(),
+            adult_age_confirmed: false,
             _subscriptions: subscriptions,
         }
     }
@@ -157,18 +178,13 @@ impl SettingsPage {
         {
             tracing::error!("設定を保存できません: {err:#}");
         }
-        crate::app::apply_theme(settings.theme, cx);
+        crate::ui::theme::apply(settings.theme, cx);
         cx.notify();
     }
 
-    fn apply_number(
-        &mut self,
-        index: usize,
-        field: NumberField,
-        text: &str,
-        cx: &mut Context<Self>,
-    ) {
-        self.errors.retain(|(i, _)| *i != index);
+    /// 数の入力欄。入れ途中の空欄や誤った値は保存せず、その行に誤りを出す。
+    fn apply_number(&mut self, field: NumberField, text: &str, cx: &mut Context<Self>) {
+        self.errors.retain(|(f, _)| *f != field);
         match text.trim().parse::<u64>() {
             Ok(value) => {
                 let mut error = None;
@@ -178,16 +194,103 @@ impl SettingsPage {
                     }
                 });
                 if let Some(message) = error {
-                    self.errors.push((index, message));
+                    self.errors.push((field, message));
                 }
             }
-            Err(_) => self.errors.push((index, "数値を入れてください")),
+            Err(_) => self.errors.push((field, "数を入れてください")),
         }
         cx.notify();
     }
 
-    /// カタログの取り込みの状況。
-    fn render_catalog(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn set_interval(&mut self, minutes: u32, window: &mut Window, cx: &mut Context<Self>) {
+        self.custom_interval = false;
+        self.errors
+            .retain(|(field, _)| *field != NumberField::Interval);
+        if let Some((_, state)) = self
+            .numbers
+            .iter()
+            .find(|(field, _)| *field == NumberField::Interval)
+        {
+            // 入力欄の値を変えると、その知らせで保存する。
+            state.update(cx, |state, cx| {
+                state.set_value(minutes.to_string(), window, cx)
+            });
+        }
+        self.update(cx, |settings| settings.interval_minutes = minutes);
+    }
+
+    fn number_input(&self, field: NumberField) -> impl IntoElement {
+        let state = self
+            .numbers
+            .iter()
+            .find(|(f, _)| *f == field)
+            .map(|(_, state)| state.clone())
+            .expect("数の入力欄");
+        div().w(px(128.)).child(
+            Input::new(&state)
+                .small()
+                .suffix(div().text_xs().child(field.unit())),
+        )
+    }
+
+    fn error_of(&self, field: NumberField) -> Option<&'static str> {
+        self.errors
+            .iter()
+            .find(|(f, _)| *f == field)
+            .map(|(_, message)| *message)
+    }
+
+    /// 取得の間隔: 選択肢のメニューと、カスタムのときの分の入力欄。
+    fn render_interval(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let minutes = self.app.read(cx).settings().interval_minutes;
+        let custom = self.custom_interval || interval_label(minutes).is_none();
+        let label: SharedString = if custom {
+            "カスタム".into()
+        } else {
+            interval_label(minutes).unwrap_or_default().into()
+        };
+        let page = cx.entity().downgrade();
+        h_flex()
+            .gap_2()
+            .when(custom, |this| {
+                this.child(self.number_input(NumberField::Interval))
+            })
+            .child(
+                Button::new("interval-choice")
+                    .small()
+                    .outline()
+                    .label(label)
+                    .dropdown_caret(true)
+                    .dropdown_menu(move |mut menu, _, _| {
+                        for (value, text) in INTERVALS {
+                            let page = page.clone();
+                            menu = menu.item(
+                                PopupMenuItem::new(text)
+                                    .checked(!custom && value == minutes)
+                                    .on_click(move |_, window, cx| {
+                                        let _ = page.update(cx, |page, cx| {
+                                            page.set_interval(value, window, cx)
+                                        });
+                                    }),
+                            );
+                        }
+                        let page = page.clone();
+                        menu.separator().item(
+                            PopupMenuItem::new("カスタム (分で指定)")
+                                .checked(custom)
+                                .on_click(move |_, _, cx| {
+                                    let _ = page.update(cx, |page, cx| {
+                                        page.custom_interval = true;
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                    }),
+            )
+    }
+
+    /// カタログの取り込みの状況と操作。
+    fn render_catalog(&self, stacked: bool, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme().clone();
         let app = self.app.read(cx);
         let status = app.catalog_status().clone();
@@ -199,64 +302,73 @@ impl SettingsPage {
                 "最終確認 {}",
                 crate::format::relative_time(at, now)
             )),
-            None => facts.push("同梱の版を使用中".to_string()),
+            None => facts.push("同梱の版を使っています".to_string()),
         }
         if let Some(revision) = &status.revision {
             facts.push(format!("版 {}", &revision[..revision.len().min(7)]));
         }
         let problems = catalog.problems().to_vec();
-        if !problems.is_empty() {
-            facts.push(format!("読めないファイル {} 件", problems.len()));
-        }
-        let controls = h_flex().gap_2().child(
-            Button::new("apply-catalog")
-                .small()
-                .primary()
-                .icon(IconName::RefreshCw)
-                .label("今すぐ取り込む")
-                .loading(status.checking)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.app.update(cx, |app, cx| app.refresh_catalog(cx));
-                })),
-        );
-        v_flex()
-            .gap_2()
+        Card::new()
+            .title("カタログ")
+            .description("ゲームごとの取得の定義を、起動時と 1 日 1 回、自動で取り込みます。")
+            .divided()
             .child(
-                FormRow::new("取得定義のカタログ", controls)
-                    .help("ゲームごとの取得の定義を、起動時と 1 日 1 回、自動で取り込みます。"),
+                SettingRow::new(
+                    "取得の定義のカタログ",
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            Button::new("open-catalog")
+                                .small()
+                                .ghost()
+                                .icon(IconName::ExternalLink)
+                                .label("カタログを開く")
+                                .on_click(|_, _, cx| open_web_url(CATALOG_REPOSITORY, cx)),
+                        )
+                        .child(
+                            Button::new("apply-catalog")
+                                .small()
+                                .outline()
+                                .icon(IconName::RefreshCw)
+                                .label("今すぐ確認")
+                                .loading(status.checking)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.app.update(cx, |app, cx| app.refresh_catalog(cx));
+                                })),
+                        ),
+                )
+                .description(facts.join(" · "))
+                .error(
+                    status
+                        .error
+                        .clone()
+                        .map(|error| format!("取り込めませんでした: {error}")),
+                )
+                .stacked(stacked),
             )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(facts.join(" · "))
-                    .child(
-                        Button::new("open-catalog")
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::ExternalLink)
-                            .label("カタログを開く")
-                            .on_click(|_, _, cx| open_web_url(CATALOG_REPOSITORY, cx)),
-                    ),
-            )
-            .when_some(status.error.clone(), |this, error| {
+            .when(!problems.is_empty(), |this| {
                 this.child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.danger)
-                        .child(format!("取り込めませんでした: {error}")),
+                    v_flex()
+                        .gap_1()
+                        .py_3()
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_semibold()
+                                .text_color(theme.muted_foreground)
+                                .child(format!("読めないファイル {} 件", problems.len())),
+                        )
+                        .children(problems.iter().take(5).map(|problem| {
+                            div()
+                                .text_xs()
+                                .text_color(match problem.kind {
+                                    ProblemKind::NeedsNewerApp => theme.muted_foreground,
+                                    ProblemKind::Invalid => theme.warning,
+                                })
+                                .child(problem.to_string())
+                        })),
                 )
             })
-            .children(problems.iter().take(5).map(|problem| {
-                div()
-                    .text_xs()
-                    .text_color(match problem.kind {
-                        ProblemKind::NeedsNewerApp => theme.muted_foreground,
-                        ProblemKind::Invalid => theme.warning,
-                    })
-                    .child(problem.to_string())
-            }))
             .into_any_element()
     }
 
@@ -324,110 +436,114 @@ impl SettingsPage {
         .detach();
     }
 
-    fn toggle(
+    fn switch(
         &self,
         id: &'static str,
-        label: &'static str,
         checked: bool,
         cx: &mut Context<Self>,
         edit: impl Fn(&mut AppSettings, bool) + 'static,
     ) -> impl IntoElement {
         Switch::new(id)
-            .small()
-            .label(label)
             .checked(checked)
             .on_click(cx.listener(move |this, value: &bool, _, cx| {
                 let value = *value;
                 this.update(cx, |settings| edit(settings, value));
             }))
     }
-}
 
-impl SettingsPage {
-    /// ソースごとのアイコンと、画像を選ぶ・外すボタン。
-    fn render_icons(&self, cx: &mut Context<Self>) -> AnyElement {
-        let app = self.app.read(cx);
-        let icons_dir = app.services().paths().icons_dir();
-        let subscriptions = app.subscriptions().clone();
-        let rows: Vec<AnyElement> = app
-            .enabled_sources()
-            .map(|source| {
-                let has_icon = subscriptions
-                    .get(&source.id)
-                    .is_some_and(|item| item.icon.is_some());
-                let pick = {
-                    let app = self.app.clone();
-                    let id = source.id.clone();
-                    let name = source.name.clone();
-                    let icons_dir = icons_dir.clone();
-                    move |_: &gpui_kit::ClickEvent, window: &mut Window, cx: &mut App| {
-                        let app = app.clone();
-                        let source_id = id.clone();
-                        pick_and_crop(
-                            id.clone(),
-                            name.clone(),
-                            icons_dir.clone(),
-                            window,
-                            cx,
-                            move |path, window, cx| {
-                                let icon = path.display().to_string();
-                                let result = app
-                                    .update(cx, |app, cx| app.set_icon(&source_id, Some(icon), cx));
-                                let note = match result {
-                                    Ok(()) => Notification::success("アイコンを設定しました"),
-                                    Err(err) => {
-                                        Notification::error(format!("保存できません: {err:#}"))
-                                    }
-                                };
-                                window.push_notification(note, cx);
-                            },
-                        );
-                    }
-                };
-                let clear = {
-                    let app = self.app.clone();
-                    let id = source.id.clone();
-                    move |_: &gpui_kit::ClickEvent, window: &mut Window, cx: &mut App| {
-                        if let Err(err) = app.update(cx, |app, cx| app.set_icon(&id, None, cx)) {
-                            window.push_notification(
-                                Notification::error(format!("保存できません: {err:#}")),
-                                cx,
-                            );
-                        }
-                    }
-                };
-                h_flex()
-                    .gap_3()
-                    .py_1()
-                    .child(SourceAvatar::new(source.name.clone(), source.icon.clone()).large())
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_sm()
-                            .child(source.name.clone()),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("pick-icon-{}", source.id)))
-                            .small()
-                            .outline()
-                            .icon(IconName::ImagePlus)
-                            .label("画像を選ぶ")
-                            .on_click(pick),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("clear-icon-{}", source.id)))
-                            .small()
-                            .ghost()
-                            .label("外す")
-                            .disabled(!has_icon)
-                            .on_click(clear),
-                    )
-                    .into_any_element()
-            })
-            .collect();
-        v_flex().gap_1().children(rows).into_any_element()
+    /// 成人向けの版を使うかを切り替える。入れるときは毎回、18 歳以上であることを明示させ、
+    /// 同意を得てから入れる (同意した時刻を設定に残す)。切るときは確かめず、同意も消す。
+    fn set_adult_content(&mut self, enabled: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !enabled {
+            self.apply_adult_consent(None, window, cx);
+            return;
+        }
+        self.adult_age_confirmed = false;
+        let page = cx.entity().downgrade();
+        window.open_dialog(cx, move |dialog, _, cx| {
+            let theme = cx.theme();
+            let confirmed = page
+                .upgrade()
+                .is_some_and(|page| page.read(cx).adult_age_confirmed);
+            let check = page.clone();
+            let accept = page.clone();
+            dialog
+                .title("18 歳以上であることの確認")
+                .w(px(480.))
+                .child(
+                    v_flex()
+                        .gap_3()
+                        .child(div().text_sm().child(ADULT_CONSENT_TEXT))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child("18 歳未満の方は有効にしないでください。有効にしたあとも、この設定でいつでも切れます。"),
+                        )
+                        .child(
+                            Checkbox::new("adult-age")
+                                .label("私は 18 歳以上です")
+                                .checked(confirmed)
+                                .on_click(move |checked: &bool, window, cx| {
+                                    let checked = *checked;
+                                    let _ = check.update(cx, |page, cx| {
+                                        page.adult_age_confirmed = checked;
+                                        cx.notify();
+                                    });
+                                    window.refresh();
+                                }),
+                        ),
+                )
+                .footer(
+                    h_flex()
+                        .w_full()
+                        .justify_end()
+                        .gap_2()
+                        .child(
+                            Button::new("adult-cancel")
+                                .small()
+                                .ghost()
+                                .label("キャンセル")
+                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                        )
+                        .child(
+                            Button::new("adult-accept")
+                                .small()
+                                .primary()
+                                .label("同意して有効にする")
+                                .disabled(!confirmed)
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let _ = accept.update(cx, |page, cx| {
+                                        if std::mem::take(&mut page.adult_age_confirmed) {
+                                            page.apply_adult_consent(Some(Utc::now()), window, cx);
+                                        }
+                                    });
+                                }),
+                        ),
+                )
+        });
+    }
+
+    /// 成人向けのソースの同意を設定に入れる・消す。保存できなければ知らせる (切るときは、保存に
+    /// 失敗しても先に使うのをやめている)。
+    fn apply_adult_consent(
+        &mut self,
+        consented_at: Option<chrono::DateTime<Utc>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(err) = self
+            .app
+            .update(cx, |app, cx| app.set_adult_consent(consented_at, cx))
+        {
+            tracing::error!("設定を保存できません: {err:#}");
+            window.push_notification(
+                Notification::error(format!("設定を保存できません: {err:#}")),
+                cx,
+            );
+        }
+        cx.notify();
     }
 
     fn set_autostart(&mut self, enabled: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -449,146 +565,274 @@ fn folder_button(id: &'static str, label: &'static str, path: PathBuf) -> impl I
 }
 
 impl Render for SettingsPage {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let settings = self.app.read(cx).settings().clone();
         let paths = self.app.read(cx).services().paths().clone();
         let theme = settings.theme;
+        // カードの中が狭いときは、操作を説明の下に置く。
+        let stacked = window.viewport_size().width < px(880.);
 
-        let numbers: Vec<_> = self
-            .numbers
-            .iter()
-            .enumerate()
-            .map(|(index, (field, state))| {
-                let error = self
-                    .errors
-                    .iter()
-                    .find(|(i, _)| *i == index)
-                    .map(|(_, message)| *message);
-                FormRow::new(
-                    field.label(),
-                    div().w(px(160.)).child(Input::new(state).small()),
-                )
-                .help(field.help())
-                .error(error)
-            })
-            .collect();
+        let display = Card::new().title("表示").divided().child(
+            SettingRow::new(
+                "テーマ",
+                segmented(
+                    "theme",
+                    &["システム", "ライト", "ダーク"],
+                    match theme {
+                        ThemePreference::System => 0,
+                        ThemePreference::Light => 1,
+                        ThemePreference::Dark => 2,
+                    },
+                    cx.listener(|this, index: &usize, _, cx| {
+                        let value = match index {
+                            1 => ThemePreference::Light,
+                            2 => ThemePreference::Dark,
+                            _ => ThemePreference::System,
+                        };
+                        this.update(cx, |settings| settings.theme = value)
+                    }),
+                ),
+            )
+            .description("「システム」は OS のライト・ダークに合わせます。")
+            .stacked(stacked),
+        );
 
-        let theme_buttons = [
-            (ThemePreference::System, "システムに合わせる"),
-            (ThemePreference::Light, "ライト"),
-            (ThemePreference::Dark, "ダーク"),
-        ]
-        .into_iter()
-        .map(|(value, label)| {
-            Button::new(SharedString::from(format!("theme-{value:?}")))
-                .small()
-                .outline()
-                .selected(theme == value)
-                .label(label)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.update(cx, |settings| settings.theme = value)
-                }))
-        })
-        .collect::<Vec<_>>();
-
-        v_flex()
-            .size_full()
-            .child(PageHeader::new("設定").description("取得の間隔と常駐のしかた、表示を変えます。変更はすぐに保存されます。"))
+        let fetching = Card::new()
+            .title("自動取得")
+            .divided()
             .child(
-                div().id("settings-scroll").flex_1().min_h_0().overflow_y_scrollbar().child(
-                    v_flex()
-                        .gap_4()
-                        .p_4()
-                        .max_w(px(720.))
-                        .child(SectionLabel::new("取得"))
-                        .children(numbers)
-                        .child(self.toggle("fetch-on-startup", "起動したらすぐ取得する", settings.fetch_on_startup, cx, |settings, value| {
-                            settings.fetch_on_startup = value
-                        }))
-                        .child(SectionLabel::new("カタログ"))
-                        .child(self.render_catalog(cx))
-                        .child(SectionLabel::new("常駐と通知"))
-                        .child(
-                            Switch::new("autostart")
-                                .small()
-                                .label(crate::autostart::SETTING_LABEL)
-                                .checked(self.autostart)
-                                .on_click(cx.listener(|this, value: &bool, window, cx| {
-                                    this.set_autostart(*value, window, cx)
-                                })),
-                        )
-                        .child(self.toggle("close-to-tray", crate::tray::CLOSE_TO_TRAY_LABEL, settings.close_to_tray, cx, |settings, value| {
-                            settings.close_to_tray = value
-                        }))
-                        .child(self.toggle("start-in-tray", crate::tray::START_IN_TRAY_LABEL, settings.start_in_tray, cx, |settings, value| {
-                            settings.start_in_tray = value
-                        }))
-                        .child(self.toggle("notify", crate::shortcut::NOTIFY_SETTING_LABEL, settings.notify_new_entries, cx, |settings, value| {
+                SettingRow::new("取得の間隔", self.render_interval(cx))
+                    .description("ソースごとの指定がなければこの間隔で取得します。失敗が続くソースは間隔を延ばします。")
+                    .error(self.error_of(NumberField::Interval))
+                    .stacked(stacked),
+            )
+            .child(
+                SettingRow::new(
+                    "起動したらすぐ取得する",
+                    self.switch("fetch-on-startup", settings.fetch_on_startup, cx, |settings, value| {
+                        settings.fetch_on_startup = value
+                    }),
+                )
+                .stacked(stacked),
+            );
+
+        let resident = Card::new()
+            .title("常駐と通知")
+            .divided()
+            .child(
+                SettingRow::new(
+                    crate::autostart::SETTING_LABEL,
+                    Switch::new("autostart")
+                        .checked(self.autostart)
+                        .on_click(cx.listener(|this, value: &bool, window, cx| {
+                            this.set_autostart(*value, window, cx)
+                        })),
+                )
+                .stacked(stacked),
+            )
+            .child(
+                SettingRow::new(
+                    crate::tray::CLOSE_TO_TRAY_LABEL,
+                    self.switch(
+                        "close-to-tray",
+                        settings.close_to_tray,
+                        cx,
+                        |settings, value| settings.close_to_tray = value,
+                    ),
+                )
+                .description("切ると、ウィンドウを閉じたときにアプリを終了します。")
+                .stacked(stacked),
+            )
+            .child(
+                SettingRow::new(
+                    crate::tray::START_IN_TRAY_LABEL,
+                    self.switch(
+                        "start-in-tray",
+                        settings.start_in_tray,
+                        cx,
+                        |settings, value| settings.start_in_tray = value,
+                    ),
+                )
+                .stacked(stacked),
+            )
+            .child(
+                SettingRow::new(
+                    crate::shortcut::NOTIFY_SETTING_LABEL,
+                    self.switch(
+                        "notify",
+                        settings.notify_new_entries,
+                        cx,
+                        |settings, value| {
                             settings.notify_new_entries = value;
                             if value {
                                 crate::shortcut::ensure_in_background();
                             }
-                        }))
-                        .child(SectionLabel::new("表示"))
-                        .child(FormRow::new("テーマ", h_flex().gap_1().children(theme_buttons)))
-                        .child(SectionLabel::new("ゲームのアイコン"))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("使っているゲームのアイコンを変えます。画像を選ぶと正方形に切り抜く画面が開き、切り抜いたアイコンはニュースの一覧と本文に角丸で出ます。"),
-                        )
-                        .child(self.render_icons(cx))
-                        .child(SectionLabel::new("記事の取り込みと書き出し"))
-                        .child(
-                            FormRow::new(
-                                "game_info.jsonl の書き出し先",
-                                h_flex()
-                                    .gap_2()
-                                    .child(div().flex_1().child(Input::new(&self.export_dir).small().cleanable(true)))
-                                    .child(
-                                        Button::new("choose-export")
-                                            .small()
-                                            .outline()
-                                            .label("選ぶ")
-                                            .on_click(cx.listener(|this, _, window, cx| this.choose_export_dir(window, cx))),
-                                    ),
-                            )
-                            .help("指定すると、取得のたびに game_info.jsonl 形式で記事を書き出します。"),
-                        )
-                        .child(
-                            FormRow::new(
-                                "記事の取り込み",
-                                h_flex().child(
-                                    Button::new("import-legacy")
-                                        .small()
-                                        .outline()
-                                        .icon(IconName::Download)
-                                        .label("game_info.jsonl を取り込む")
-                                        .on_click(cx.listener(|this, _, window, cx| this.import_legacy(window, cx))),
-                                ),
-                            )
-                            .help("game_info.jsonl 形式の記事を取り込みます。同じタイトルの記事を取得すると引き継ぎます。"),
-                        )
-                        .child(SectionLabel::new("データの場所"))
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .flex_wrap()
-                                .child(folder_button("open-config", "設定", paths.settings_file()))
-                                .child(folder_button("open-local-sources", "手元の定義", paths.local_sources_dir()))
-                                .child(folder_button("open-data", "データベース", paths.database_file()))
-                                .child(folder_button("open-logs", "ログ", paths.logs_dir()))
-                                .child(folder_button("open-cache", "画像キャッシュ", paths.images_dir())),
-                        )
-                        .child(
-                            div()
-                                .pt_4()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(format!("Game News Nexus {}", env!("CARGO_PKG_VERSION"))),
-                        ),
-                ),
+                        },
+                    ),
+                )
+                .stacked(stacked),
+            );
+
+        let storage = Card::new()
+            .title("記事の保存")
+            .divided()
+            .child(
+                SettingRow::new("新しく取得する記事", self.number_input(NumberField::MaxAge))
+                    .description("この日数より古い記事は取り込みません。0 で期間を制限しません。")
+                    .error(self.error_of(NumberField::MaxAge))
+                    .stacked(stacked),
             )
+            .child(
+                SettingRow::new(
+                    "保存済みの記事を残す期間",
+                    self.number_input(NumberField::Retention),
+                )
+                .description("これより古いお知らせを消します。0 で自動では消しません。")
+                .error(self.error_of(NumberField::Retention))
+                .stacked(stacked),
+            );
+
+        let adult = Card::new().title("成人向けの内容").divided().child(
+            SettingRow::new(
+                "成人向けのソースを使う (FANZA GAMES など)",
+                Switch::new("adult-content")
+                    .checked(settings.adult_content())
+                    .on_click(cx.listener(|this, value: &bool, window, cx| {
+                        this.set_adult_content(*value, window, cx)
+                    })),
+            )
+            .description(match settings.adult_consented_at {
+                Some(at) => format!(
+                    "{} に 18 歳以上であることを確かめて有効にしました。FANZA GAMES の版があるゲームは、その版のお知らせを取得します。切ると成人向けのソースを使うのをやめ、そのお知らせを隠します (保存した記事は消しません)。",
+                    at.with_timezone(&Local).format("%Y年%m月%d日 %H:%M")
+                ),
+                None => "DMM GAMES のゲームのうち、FANZA GAMES の成人向けの版があるものはその版のお知らせを取得し、FANZA GAMES だけのゲームもソース画面で選べるようにします。18 歳以上の方だけが使えます (入れるときに確かめます)。".to_string(),
+            })
+            .stacked(stacked),
+        );
+
+        let advanced = Card::new()
+            .title("詳細")
+            .divided()
+            .child(
+                SettingRow::new("同時に取得するソースの数", self.number_input(NumberField::Concurrency))
+                    .description("同じサイトへの同時接続は、これとは別に 2 本までに抑えています。")
+                    .error(self.error_of(NumberField::Concurrency))
+                    .stacked(stacked),
+            )
+            .child(
+                SettingRow::new(
+                    "game_info.jsonl の書き出し先",
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .w(px(220.))
+                                .child(Input::new(&self.export_dir).small().cleanable(true)),
+                        )
+                        .child(
+                            Button::new("choose-export")
+                                .small()
+                                .outline()
+                                .label("選ぶ")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.choose_export_dir(window, cx)
+                                })),
+                        ),
+                )
+                .description("指定すると、取得のたびに game_info.jsonl 形式で記事を書き出します。")
+                .stacked(true),
+            )
+            .child(
+                SettingRow::new(
+                    "記事の取り込み",
+                    Button::new("import-legacy")
+                        .small()
+                        .outline()
+                        .icon(IconName::Download)
+                        .label("game_info.jsonl を取り込む")
+                        .on_click(cx.listener(|this, _, window, cx| this.import_legacy(window, cx))),
+                )
+                .description("game_info.jsonl 形式の記事を取り込みます。同じタイトルの記事を取得すると引き継ぎます。")
+                .stacked(stacked),
+            )
+            .child(
+                SettingRow::new(
+                    "データの場所",
+                    h_flex()
+                        .gap_2()
+                        .flex_wrap()
+                        .child(folder_button("open-config", "設定", paths.settings_file()))
+                        .child(folder_button("open-local-sources", "手元の定義", paths.local_sources_dir()))
+                        .child(folder_button("open-data", "データベース", paths.database_file()))
+                        .child(folder_button("open-logs", "ログ", paths.logs_dir()))
+                        .child(folder_button("open-cache", "画像キャッシュ", paths.images_dir())),
+                )
+                .description("エクスプローラー (macOS は Finder) で開きます。")
+                .stacked(true),
+            );
+
+        v_flex()
+            .size_full()
+            .child(PageHeader::new("設定").description("変更は自動で保存されます。"))
+            .child(
+                div()
+                    .id("settings-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .max_w(px(880.))
+                            .gap_5()
+                            .px_8()
+                            .py_6()
+                            .child(display)
+                            .child(fetching)
+                            .child(resident)
+                            .child(storage)
+                            .child(adult)
+                            .child(self.render_catalog(stacked, cx))
+                            .child(advanced)
+                            .child(
+                                h_flex().gap_3().pt_2().child(AppLogo::new(px(40.))).child(
+                                    v_flex()
+                                        .gap_0p5()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .font_semibold()
+                                                .child("Game News Nexus"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(format!(
+                                                    "バージョン {}",
+                                                    env!("CARGO_PKG_VERSION")
+                                                )),
+                                        ),
+                                ),
+                            ),
+                    ),
+            )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interval_choices_cover_the_common_values() {
+        assert_eq!(interval_label(60), Some("1 時間"));
+        assert_eq!(interval_label(1440), Some("24 時間"));
+        assert_eq!(interval_label(45), None);
+        let mut settings = AppSettings::default();
+        assert!(NumberField::Interval.write(&mut settings, 0).is_err());
+        assert!(NumberField::Interval.write(&mut settings, 5000).is_ok());
+        assert_eq!(settings.interval_minutes, 24 * 60);
     }
 }

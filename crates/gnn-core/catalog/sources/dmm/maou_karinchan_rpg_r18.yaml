@@ -1,0 +1,26 @@
+# 魔王カリンちゃんRPGX (魔王カリンちゃんRPG の FANZA GAMES 版。一般版は maou_karinchan_rpg)
+# yaml-language-server: $schema=../../schema/source.schema.json
+schema: 2
+min_app_version: '26.11.6'
+id: maou_karinchan_rpg_r18
+name: '魔王カリンちゃんRPGX'
+adult: true
+general_edition: maou_karinchan_rpg
+tags:
+  - dmm
+max_items: 40
+lists:
+  - kind: html
+    request:
+      url: 'https://api.karinchan-rpg.com/bottom/announce/list?rating=2'
+    items: ul.page-announce-list li a.i-link
+    fields:
+      url:
+        attr: href
+detail:
+  kind: html
+  fields:
+    title: '.page-announce-detail .i-title'
+    published: '.page-announce-detail .i-date'
+    body:
+      selector: '.page-announce-detail .i-text'

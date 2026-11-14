@@ -1,4 +1,4 @@
-# ドットアビス
+# ドットアビス (DMM GAMES 版。FANZA GAMES 版は dot_abyss_r18)
 # yaml-language-server: $schema=../../schema/source.schema.json
 schema: 2
 min_app_version: '26.11.6'
@@ -10,14 +10,14 @@ note: '配信元の WAF が HTTP クライアントの TLS の指紋で拒否す
 lists:
   - kind: html
     request:
-      url: 'https://api.abyss-prod-r18.dotabyss.dmmgames.com/information/index?is_official_site=1&device=PC_R18'
+      url: 'https://api.abyss-prod.dotabyss.dmmgames.com/information/index?is_official_site=1'
     items: '#info .listWrapper ul.infoListContainer > li > a.infoList'
     fields:
       id:
         attr: data-info-id
       url:
         attr: data-info-id
-        template: 'https://api.abyss-prod-r18.dotabyss.dmmgames.com/information/detail?information_id={{value}}&is_webview=0&token='
+        template: 'https://api.abyss-prod.dotabyss.dmmgames.com/information/detail?information_id={{value}}&is_webview=0&token='
       published: '.listData p'
 detail:
   kind: html
@@ -28,6 +28,6 @@ detail:
 # 本文の画像の署名 (s) と期限 (t) は、詳細ページを取るたびに変わる。同じ画像として扱う。
 url_identity:
   images:
-    - origin: 'https://api.abyss-prod-r18.dotabyss.dmmgames.com'
+    - origin: 'https://api.abyss-prod.dotabyss.dmmgames.com'
       path_prefix: '/resources/web/img/'
       ignore_query: ['s', 't']

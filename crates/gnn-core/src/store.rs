@@ -19,7 +19,8 @@ use crate::text::{html_to_text, normalize};
 /// 3: 記事の版 (`revision`)・本文を確かめた時刻 (`body_checked_at`)・予定の読み取り結果
 ///    (`schedule_analysis`)・予定の表 (`schedule_items`) を持つ。本文の日付の列 (`notable_dates`) をなくす。
 /// 4: 取得の定義の `url_identity.images` に合う画像の取得 URL (`entry_images`) を持つ。
-const DATABASE_VERSION: i32 = 4;
+/// 5: 一般向けの版から成人向けの版へ記事を移した組 (`edition_migrations`) を持つ。
+const DATABASE_VERSION: i32 = 5;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS entries (
@@ -130,6 +131,15 @@ CREATE TABLE IF NOT EXISTS entry_images (
     PRIMARY KEY (entry_id, key)
 );
 CREATE INDEX IF NOT EXISTS entry_images_key ON entry_images (source_id, key, seen_at);
+
+-- 一般向けの版のソースの記事を、成人向けの版のソースへ移した組 (取得の定義の inherit_articles)。
+-- 組ごとに 1 度だけ移す。moved は移した記事の数。
+CREATE TABLE IF NOT EXISTS edition_migrations (
+    adult_id TEXT PRIMARY KEY,
+    general_id TEXT NOT NULL,
+    migrated_at INTEGER NOT NULL,
+    moved INTEGER NOT NULL
+);
 "#;
 
 /// 取得ログを残す件数。
@@ -601,55 +611,61 @@ impl Store {
 
     /// 一覧用の要約を新しい順に返す。
     pub fn query(&self, query: &EntryQuery) -> Result<Vec<EntrySummary>> {
-        let mut sql = format!("SELECT {SUMMARY_COLUMNS} FROM entries WHERE channel = ?");
-        let mut values: Vec<rusqlite::types::Value> =
-            vec![query.channel.as_str().to_string().into()];
-
-        if let Some(source_ids) = &query.source_ids {
-            if source_ids.is_empty() {
-                return Ok(Vec::new());
-            }
-            sql.push_str(&format!(
-                " AND source_id IN ({})",
-                vec!["?"; source_ids.len()].join(",")
-            ));
-            values.extend(source_ids.iter().map(|id| id.clone().into()));
-        }
-        if let Some(ids) = &query.ids {
-            if ids.is_empty() {
-                return Ok(Vec::new());
-            }
-            sql.push_str(&format!(" AND id IN ({})", vec!["?"; ids.len()].join(",")));
-            values.extend(ids.iter().map(|id| (*id).into()));
-        }
-        if query.unread_only {
-            sql.push_str(" AND read_at IS NULL");
-        }
-        if let Some(search) = query
-            .search
-            .as_deref()
-            .map(normalize)
-            .filter(|search| !search.trim().is_empty())
-        {
-            let search = search.trim().to_string();
-            if search.chars().count() >= 3 {
-                sql.push_str(
-                    " AND id IN (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ?)",
-                );
-                values.push(format!("\"{}\"", search.replace('"', "\"\"")).into());
-            } else {
-                sql.push_str(
-                    " AND id IN (SELECT rowid FROM entries_fts WHERE instr(search, ?) > 0)",
-                );
-                values.push(search.into());
-            }
-        }
-        sql.push_str(" ORDER BY sort_at DESC, id DESC LIMIT ?");
+        let Some((filter, mut values)) = entry_filter(query) else {
+            return Ok(Vec::new());
+        };
+        let sql = format!(
+            "SELECT {SUMMARY_COLUMNS} FROM entries WHERE {filter} ORDER BY sort_at DESC, id DESC LIMIT ?"
+        );
         values.push((query.limit as i64).into());
 
         let mut statement = self.conn.prepare(&sql)?;
         let rows = statement.query_map(params_from_iter(values), summary_from_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// 条件に合う未読の記事を、件数の上限 (`limit`) によらずすべて既読にし、既読にした記事の ID を返す
+    /// (取り消すときは [`Store::mark_unread_ids`] に渡す)。
+    pub fn mark_read_matching(
+        &mut self,
+        query: &EntryQuery,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<i64>> {
+        let Some((filter, values)) = entry_filter(query) else {
+            return Ok(Vec::new());
+        };
+        let tx = self.conn.transaction()?;
+        let ids: Vec<i64> = {
+            let mut statement = tx.prepare(&format!(
+                "SELECT id FROM entries WHERE {filter} AND read_at IS NULL"
+            ))?;
+            let rows = statement.query_map(params_from_iter(values), |row| row.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        {
+            let mut statement = tx.prepare("UPDATE entries SET read_at = ?2 WHERE id = ?1")?;
+            for id in &ids {
+                statement.execute(params![id, now.timestamp()])?;
+            }
+        }
+        tx.commit()?;
+        Ok(ids)
+    }
+
+    /// 指定した既読の記事を未読に戻す (一括の既読を取り消すとき)。
+    pub fn mark_unread_ids(&mut self, ids: &[i64]) -> Result<usize> {
+        let tx = self.conn.transaction()?;
+        let mut changed = 0;
+        {
+            let mut statement = tx.prepare(
+                "UPDATE entries SET read_at = NULL WHERE id = ?1 AND read_at IS NOT NULL",
+            )?;
+            for id in ids {
+                changed += statement.execute([id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(changed)
     }
 
     pub fn entry(&self, id: i64) -> Result<Option<Entry>> {
@@ -719,6 +735,42 @@ impl Store {
         Ok(self.conn.execute(&sql, params_from_iter(values))?)
     }
 
+    /// ソースごとの保存済みの記事の数。
+    pub fn entry_counts(&self, channel: Channel) -> Result<HashMap<String, usize>> {
+        let mut statement = self.conn.prepare(
+            "SELECT source_id, COUNT(*) FROM entries WHERE channel = ?1 GROUP BY source_id",
+        )?;
+        let rows = statement.query_map([channel.as_str()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// ソースごとの最後の取得の記録 (取得ログに残っているもの)。
+    pub fn last_runs(&self) -> Result<HashMap<String, FetchRun>> {
+        let mut statement = self.conn.prepare(
+            "SELECT source_id, started_at, finished_at, status, listed, added, updated, message
+             FROM fetch_log WHERE id IN (SELECT MAX(id) FROM fetch_log GROUP BY source_id)",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(FetchRun {
+                source_id: row.get(0)?,
+                started_at: from_unix(row.get(1)?),
+                finished_at: from_unix(row.get(2)?),
+                status: RunStatus::parse(&row.get::<_, String>(3)?),
+                listed: row.get::<_, i64>(4)? as usize,
+                added: row.get::<_, i64>(5)? as usize,
+                updated: row.get::<_, i64>(6)? as usize,
+                message: row.get(7)?,
+            })
+        })?;
+        rows.map(|row| {
+            row.map(|run| (run.source_id.clone(), run))
+                .map_err(Into::into)
+        })
+        .collect()
+    }
+
     /// ソースごとの未読数。
     pub fn unread_counts(&self, channel: Channel) -> Result<HashMap<String, usize>> {
         let mut statement = self.conn.prepare(
@@ -744,6 +796,80 @@ impl Store {
         }
         tx.commit()?;
         Ok(ids.len())
+    }
+
+    /// 一般向けの版のソースの記事を、成人向けの版のソースへ移す (取得の定義の `inherit_articles`)。
+    ///
+    /// 一般向けの版がこれまで成人向けの版の取得先から取得していた記事を、成人向けの版の記事にする
+    /// (同意していない利用者に、一般向けの版の記事として出さない)。組ごとに 1 度だけ行い、移した記事の
+    /// 数を返す (もう移していれば `None`)。既読・初めて見た時刻・版・予定の読み取り結果はそのまま。
+    /// 本文と画像の参照 (`https://source-image.invalid/<ソース ID>/...`) と画像の取得 URL の記録も移し、
+    /// 予定の表は両方のソースで作り直す。成人向けの版に同じ外部 ID の記事があれば、そちらを残す。
+    pub fn inherit_articles(&mut self, general_id: &str, adult_id: &str) -> Result<Option<usize>> {
+        let tx = self.conn.transaction()?;
+        let done: bool = tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM edition_migrations WHERE adult_id = ?1)",
+            [adult_id],
+            |row| row.get(0),
+        )?;
+        if done {
+            return Ok(None);
+        }
+        let duplicates: Vec<i64> = {
+            let mut statement = tx.prepare(
+                "SELECT g.id FROM entries g
+                 JOIN entries a ON a.source_id = ?2 AND a.external_id = g.external_id
+                 WHERE g.source_id = ?1",
+            )?;
+            let rows = statement.query_map(params![general_id, adult_id], |row| row.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for id in duplicates {
+            delete_entry(&tx, id)?;
+        }
+        let from = format!("https://{}/{general_id}/", image_ref::REFERENCE_HOST);
+        let to = format!("https://{}/{adult_id}/", image_ref::REFERENCE_HOST);
+        let moved: Vec<(i64, String)> = {
+            let mut statement = tx.prepare(
+                "UPDATE entries SET source_id = ?2,
+                    body_html = replace(body_html, ?3, ?4), image_url = replace(image_url, ?3, ?4)
+                 WHERE source_id = ?1 RETURNING id, body_html",
+            )?;
+            let rows = statement.query_map(params![general_id, adult_id, from, to], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for (id, body_html) in &moved {
+            tx.execute(
+                "UPDATE entries SET content_hash = ?2 WHERE id = ?1",
+                params![id, content_hash(body_html)],
+            )?;
+            tx.execute(
+                "UPDATE entry_images SET source_id = ?2 WHERE entry_id = ?1",
+                params![id, adult_id],
+            )?;
+        }
+        tx.execute(
+            "UPDATE schedule_items SET source_id = ?2 WHERE source_id = ?1",
+            params![general_id, adult_id],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO schedule_stale_sources (source_id) VALUES (?1), (?2)",
+            params![general_id, adult_id],
+        )?;
+        tx.execute(
+            "INSERT INTO edition_migrations (adult_id, general_id, migrated_at, moved)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                adult_id,
+                general_id,
+                Utc::now().timestamp(),
+                moved.len() as i64
+            ],
+        )?;
+        tx.commit()?;
+        Ok(Some(moved.len()))
     }
 
     /// ソースの記事と状態をすべて消す。
@@ -1118,6 +1244,51 @@ fn migrate(tx: &Transaction<'_>) -> Result<()> {
 
 const SUMMARY_COLUMNS: &str = "id, source_id, channel, title, url, image_url, note, published_at, published_precision, first_seen_at, sort_at, read_at";
 const SUMMARY_COLUMN_COUNT: usize = 12;
+
+/// 一覧の絞り込み条件 (`limit` を除く) を、`entries` の SQL の条件と値にする。一致する記事がないと
+/// 決まれば (ソースや ID の指定が空) `None`。[`Store::query`] と [`Store::mark_read_matching`] で
+/// 同じ条件を使う。
+fn entry_filter(query: &EntryQuery) -> Option<(String, Vec<rusqlite::types::Value>)> {
+    let mut sql = "channel = ?".to_string();
+    let mut values: Vec<rusqlite::types::Value> = vec![query.channel.as_str().to_string().into()];
+
+    if let Some(source_ids) = &query.source_ids {
+        if source_ids.is_empty() {
+            return None;
+        }
+        sql.push_str(&format!(
+            " AND source_id IN ({})",
+            vec!["?"; source_ids.len()].join(",")
+        ));
+        values.extend(source_ids.iter().map(|id| id.clone().into()));
+    }
+    if let Some(ids) = &query.ids {
+        if ids.is_empty() {
+            return None;
+        }
+        sql.push_str(&format!(" AND id IN ({})", vec!["?"; ids.len()].join(",")));
+        values.extend(ids.iter().map(|id| (*id).into()));
+    }
+    if query.unread_only {
+        sql.push_str(" AND read_at IS NULL");
+    }
+    if let Some(search) = query
+        .search
+        .as_deref()
+        .map(normalize)
+        .filter(|search| !search.trim().is_empty())
+    {
+        let search = search.trim().to_string();
+        if search.chars().count() >= 3 {
+            sql.push_str(" AND id IN (SELECT rowid FROM entries_fts WHERE entries_fts MATCH ?)");
+            values.push(format!("\"{}\"", search.replace('"', "\"\"")).into());
+        } else {
+            sql.push_str(" AND id IN (SELECT rowid FROM entries_fts WHERE instr(search, ?) > 0)");
+            values.push(search.into());
+        }
+    }
+    Some((sql, values))
+}
 
 fn summary_from_row(row: &Row<'_>) -> rusqlite::Result<EntrySummary> {
     Ok(EntrySummary {
@@ -2193,6 +2364,89 @@ mod tests {
 
     fn image_key(reference: &str) -> String {
         image_ref::parse_reference(reference).unwrap().1.to_string()
+    }
+
+    #[test]
+    fn inherits_articles_of_the_general_edition_once() {
+        let mut store = Store::open_in_memory().unwrap();
+        // 一般向けの版 (game) が、これまで成人向けの版の取得先から取得していた記事。1 は既読。
+        let report = store
+            .apply_fetch(
+                "game",
+                Channel::News,
+                &signed_images("game", &[]),
+                &[signed_draft("AAA", 100), draft("2", "続報", "<p>続き</p>")],
+                None,
+                now(),
+            )
+            .unwrap();
+        let first = report.added[0].id;
+        store.set_read(first, true, now()).unwrap();
+        // 成人向けの版 (game_r18) にも、外部 ID 2 の記事がもうある。
+        store
+            .apply_fetch(
+                "game_r18",
+                Channel::News,
+                &ImageIdentity::default(),
+                &[draft("2", "続報 (成人向け)", "<p>続き</p>")],
+                None,
+                now(),
+            )
+            .unwrap();
+
+        assert_eq!(store.inherit_articles("game", "game_r18").unwrap(), Some(1));
+        // 組ごとに 1 度だけ。
+        assert_eq!(store.inherit_articles("game", "game_r18").unwrap(), None);
+        assert!(store.known_items("game").unwrap().is_empty());
+        let mut known: Vec<String> = store.known_items("game_r18").unwrap().into_keys().collect();
+        known.sort_unstable();
+        assert_eq!(known, vec!["1", "2"]);
+        // 重なる記事は成人向けの版のものを残す。移した記事の既読はそのまま。
+        let entry = store.entry(first).unwrap().unwrap();
+        assert_eq!(entry.summary.source_id, "game_r18");
+        assert!(entry.summary.read);
+        // 本文と画像の参照も、画像の取得 URL の記録も移る。
+        assert!(
+            entry
+                .body_html
+                .contains("https://source-image.invalid/game_r18/")
+        );
+        assert!(
+            !entry
+                .body_html
+                .contains("https://source-image.invalid/game/")
+        );
+        let image = entry.summary.image_url.clone().unwrap();
+        assert!(image.starts_with("https://source-image.invalid/game_r18/"));
+        assert_eq!(
+            store
+                .image_fetch_url("game_r18", &image_key(&image))
+                .unwrap(),
+            Some(signed("banner", "AAA", 100))
+        );
+        // 成人向けの版の決まりで取り直しても、新着にも更新にもならない。
+        let report = store
+            .apply_fetch(
+                "game_r18",
+                Channel::News,
+                &signed_images("game_r18", &[]),
+                &[signed_draft("BBB", 200)],
+                None,
+                now(),
+            )
+            .unwrap();
+        assert!(report.added.is_empty());
+        assert_eq!(report.updated, 0);
+        // 予定の表は両方のソースで作り直す。
+        let stale: Vec<String> = store
+            .conn
+            .prepare("SELECT source_id FROM schedule_stale_sources ORDER BY source_id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(stale.contains(&"game".to_string()) && stale.contains(&"game_r18".to_string()));
     }
 
     #[test]
@@ -3683,6 +3937,40 @@ CREATE TABLE fetch_log (
     }
 
     #[test]
+    fn migrates_version_4_databases_to_record_edition_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gnn.db");
+        {
+            // 版 4: 記事を移した組の表 (`edition_migrations`) がない。
+            let conn = Connection::open(&path).unwrap();
+            let v4 = SCHEMA
+                .split("-- 一般向けの版のソースの記事を")
+                .next()
+                .unwrap();
+            assert!(!v4.contains("edition_migrations"));
+            conn.execute_batch(v4).unwrap();
+            conn.execute(
+                "INSERT INTO entries (id, source_id, channel, external_id, title, first_seen_at, updated_at, sort_at,
+                    read_at)
+                 VALUES (1, 'game', 'news', 'n1', 'お知らせ', ?1, ?1, ?1, ?1)",
+                [now().timestamp()],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 4).unwrap();
+        }
+        let mut store = Store::open(&path).unwrap();
+        let version: i32 = store
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, DATABASE_VERSION);
+        // 前の版の記事を、成人向けの版へ 1 度だけ移せる。
+        assert_eq!(store.inherit_articles("game", "game_r18").unwrap(), Some(1));
+        assert_eq!(store.inherit_articles("game", "game_r18").unwrap(), None);
+        assert!(store.entry(1).unwrap().unwrap().summary.read);
+    }
+
+    #[test]
     fn refuses_newer_databases() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gnn.db");
@@ -3693,5 +3981,91 @@ CREATE TABLE fetch_log (
         }
         let err = Store::open(&path).err().unwrap();
         assert!(err.to_string().contains("新しい"), "{err:#}");
+    }
+
+    #[test]
+    fn marks_every_matching_entry_read_and_undoes_it() {
+        let mut store = Store::open_in_memory().unwrap();
+        let drafts: Vec<EntryDraft> = (1..=5)
+            .map(|n| draft(&n.to_string(), &format!("お知らせ {n}"), "<p>本文</p>"))
+            .collect();
+        for (source, drafts) in [("a", &drafts[..3]), ("b", &drafts[3..])] {
+            store
+                .apply_fetch(
+                    source,
+                    Channel::News,
+                    &ImageIdentity::default(),
+                    drafts,
+                    None,
+                    now(),
+                )
+                .unwrap();
+        }
+        let entries = store.query(&EntryQuery::channel(Channel::News)).unwrap();
+        let first = entries
+            .iter()
+            .find(|entry| entry.source_id == "a")
+            .unwrap()
+            .id;
+        store.set_read(first, true, now()).unwrap();
+        assert_eq!(
+            store.entry_counts(Channel::News).unwrap(),
+            HashMap::from([("a".to_string(), 3), ("b".to_string(), 2)])
+        );
+
+        // 件数の上限によらず、条件に合う未読をすべて既読にし、既読にした記事だけを返す。
+        let query = EntryQuery {
+            source_ids: Some(vec!["a".into()]),
+            limit: 1,
+            ..EntryQuery::channel(Channel::News)
+        };
+        let mut marked = store.mark_read_matching(&query, now()).unwrap();
+        marked.sort_unstable();
+        assert_eq!(marked.len(), 2);
+        assert!(!marked.contains(&first));
+        assert_eq!(
+            store.unread_counts(Channel::News).unwrap(),
+            HashMap::from([("b".to_string(), 2)])
+        );
+        // 取り消すと、既読にした記事だけが未読に戻る (前から既読の記事はそのまま)。
+        assert_eq!(store.mark_unread_ids(&marked).unwrap(), 2);
+        assert_eq!(
+            store.unread_counts(Channel::News).unwrap(),
+            HashMap::from([("a".to_string(), 2), ("b".to_string(), 2)])
+        );
+        assert!(
+            store
+                .mark_read_matching(
+                    &EntryQuery {
+                        source_ids: Some(Vec::new()),
+                        ..EntryQuery::channel(Channel::News)
+                    },
+                    now()
+                )
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn last_runs_keep_the_latest_run_per_source() {
+        let mut store = Store::open_in_memory().unwrap();
+        let run = |source: &str, minutes: i64, added: usize| FetchRun {
+            source_id: source.into(),
+            started_at: now() + Duration::minutes(minutes),
+            finished_at: now() + Duration::minutes(minutes + 1),
+            status: RunStatus::Ok,
+            listed: 10,
+            added,
+            updated: 0,
+            message: None,
+        };
+        for (source, minutes, added) in [("a", 0, 1), ("b", 5, 2), ("a", 10, 3)] {
+            store.record_run(&run(source, minutes, added)).unwrap();
+        }
+        let runs = store.last_runs().unwrap();
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs["a"].added, 3);
+        assert_eq!(runs["b"].added, 2);
     }
 }

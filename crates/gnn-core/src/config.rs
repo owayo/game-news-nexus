@@ -182,6 +182,11 @@ pub struct AppSettings {
     /// 指定すると、取得のたびに旧形式の `game_info.jsonl` をこのディレクトリに書き出す。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub legacy_export_dir: Option<PathBuf>,
+    /// 成人向けの版 (FANZA GAMES など、取得の定義の `adult: true`) を使うことに同意した時刻。
+    /// `None` なら使わない。画面で入れるときは、毎回 18 歳以上であることを確かめてから今の時刻を
+    /// 入れる。切るときは消す (同意を残さない)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adult_consented_at: Option<DateTime<Utc>>,
 }
 
 impl Default for AppSettings {
@@ -199,11 +204,17 @@ impl Default for AppSettings {
             concurrency: 4,
             user_agent: None,
             legacy_export_dir: None,
+            adult_consented_at: None,
         }
     }
 }
 
 impl AppSettings {
+    /// 成人向けの版を使うか (18 歳以上であることと、成人向けの内容を出すことに同意している)。
+    pub fn adult_content(&self) -> bool {
+        self.adult_consented_at.is_some()
+    }
+
     pub fn interval_for(&self, source: &SourceConfig) -> u32 {
         source
             .interval_minutes
@@ -281,8 +292,34 @@ pub struct CatalogCache {
     /// 読めなかった (新しいアプリが必要だった) ファイルを読み直す。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app_version: Option<String>,
+    /// 書いたアプリのカタログの読み方の版 ([`crate::catalog::CATALOG_READER_VERSION`])。
+    /// 今の版と違う控えは使わない (同梱版から始め、ETag を使わずに取り直す)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reader_version: Option<u32>,
+    /// 新しい版が成人向けなので、前の版を成人向けとして使っているソースの ID
+    /// ([`Catalog::forced_adult_ids`])。控えの `files` は前の版の中身なので、読み直したら戻す。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forced_adult: Vec<String>,
     pub fetched_at: DateTime<Utc>,
     pub files: Vec<CachedFile>,
+}
+
+impl CatalogCache {
+    /// このアプリの読み方で書いた控えか。
+    pub fn is_current(&self) -> bool {
+        self.reader_version == Some(crate::catalog::CATALOG_READER_VERSION)
+    }
+
+    /// 控えのファイルからカタログを作る。読めないファイルは `previous` (同梱版) の同じ ID を使う。
+    pub fn catalog(&self, previous: Option<&Catalog>) -> Catalog {
+        let files = self
+            .files
+            .iter()
+            .map(|file| (file.path.as_str(), file.text.as_str()));
+        let mut catalog = Catalog::from_files(files, previous);
+        catalog.force_adult(&self.forced_adult);
+        catalog
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1156,6 +1193,26 @@ mod tests {
     }
 
     #[test]
+    fn adult_consent_round_trips_and_is_off_by_default() {
+        use chrono::TimeZone as _;
+        let (_dir, store) = store();
+        assert!(!AppSettings::default().adult_content());
+        let at = Utc.with_ymd_and_hms(2026, 11, 14, 1, 50, 0).unwrap();
+        let settings = AppSettings {
+            adult_consented_at: Some(at),
+            ..AppSettings::default()
+        };
+        store.save_settings(&settings).unwrap();
+        let loaded = store.load_settings().unwrap();
+        assert!(loaded.adult_content());
+        assert_eq!(loaded.adult_consented_at, Some(at));
+        // 同意していなければ書かない (同意の項目を知らない前の版のアプリでも読める)。
+        store.save_settings(&AppSettings::default()).unwrap();
+        let text = fs::read_to_string(store.paths().settings_file()).unwrap();
+        assert!(!text.contains("adult"), "{text}");
+    }
+
+    #[test]
     fn settings_reject_unknown_options() {
         let (_dir, store) = store();
         fs::write(store.paths().settings_file(), "unknown_option = true\n").unwrap();
@@ -1289,6 +1346,8 @@ kind = "feed"
             etag: Some("\"abc\"".into()),
             revision: Some("0123".into()),
             app_version: Some(crate::source::APP_VERSION.into()),
+            reader_version: Some(crate::catalog::CATALOG_READER_VERSION),
+            forced_adult: vec!["mist".into()],
             fetched_at: Utc::now(),
             files: vec![CachedFile {
                 path: "groups.yaml".into(),
@@ -1296,9 +1355,20 @@ kind = "feed"
             }],
         };
         store.save_catalog_cache(&cache).unwrap();
-        assert_eq!(store.load_catalog_cache().unwrap(), Some(cache));
+        let loaded = store.load_catalog_cache().unwrap().unwrap();
+        assert!(loaded.is_current());
+        assert_eq!(loaded, cache);
         fs::write(store.paths().catalog_cache_file(), "{").unwrap();
         assert_eq!(store.load_catalog_cache().unwrap(), None);
+    }
+
+    #[test]
+    fn catalog_caches_from_older_readers_are_not_current() {
+        // 成人向けのソースを読む前のアプリが書いた控え (読み方の版がない)。
+        let text = r#"{"location":"x","fetched_at":"2026-11-01T00:00:00Z","files":[]}"#;
+        let cache: CatalogCache = serde_json::from_str(text).unwrap();
+        assert!(!cache.is_current());
+        assert!(cache.forced_adult.is_empty());
     }
 
     #[test]

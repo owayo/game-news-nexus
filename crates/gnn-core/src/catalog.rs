@@ -13,7 +13,7 @@
 //! 取得先を制限する (`gnn-fetch` の `NetworkPolicy::PublicOnly`)。
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -33,6 +33,12 @@ pub const CATALOG_URL: &str =
 pub const CATALOG_REPOSITORY: &str = "https://github.com/owayo/game-news-nexus-config";
 /// グループの一覧のファイル。
 pub const GROUPS_FILE: &str = "groups.yaml";
+/// カタログの読み方の版。読み方を変えて、前の読み方で取り込んだ控え (`catalog.json`) を使い続けて
+/// はいけなくなったら上げる (控えを捨てて同梱版から始め、ETag を使わずに取り直す)。
+///
+/// 2: 成人向けのソース (`adult`・`general_edition`) を読むようになった。前の読み方では、成人向けの
+/// 取得先を一般向けのソースとして取り込んでいた。
+pub const CATALOG_READER_VERSION: u32 = 2;
 
 include!(concat!(env!("OUT_DIR"), "/bundled_catalog.rs"));
 
@@ -69,6 +75,10 @@ pub struct CatalogEntry {
     pub text: String,
     /// 中身の SHA-256 (先頭 12 文字)。
     pub hash: String,
+    /// この ID の新しい版は成人向け (`adult: true`) だが、このアプリでは読めないので前の版 (この定義) を
+    /// 使い続けている。前の版が成人向けと書いていなくても成人向けとして扱う (`source.adult` も `true`
+    /// にする)。カタログの控えにも残す ([`Catalog::forced_adult_ids`])。
+    pub forced_adult: bool,
 }
 
 /// このアプリでは使えないソース (より新しいアプリが必要)。
@@ -80,6 +90,8 @@ pub struct UnavailableEntry {
     pub name: String,
     /// 必要なアプリの版。書式の版が新しいだけなら `None`。
     pub required_app_version: Option<String>,
+    /// 成人向け (`adult: true`) と書かれている。成人向けの版を使わない利用者には、名前も出さない。
+    pub adult: bool,
 }
 
 /// 問題の種類。
@@ -118,6 +130,37 @@ pub struct Catalog {
     entries: Vec<CatalogEntry>,
     unavailable: Vec<UnavailableEntry>,
     problems: Vec<CatalogProblem>,
+    editions: Editions,
+}
+
+/// 成人向けの版と一般向けの版の組。カタログの定義だけで決める (手元の定義では変えない)。
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Editions {
+    /// 一般向けの版の代わりになる成人向けの版の ID → 一般向けの版の ID。
+    pairs: HashMap<String, String>,
+    /// `general_edition` が決まりに合わない成人向けの版。同意していても使わない。
+    invalid: HashSet<String>,
+}
+
+impl Catalog {
+    /// 一般向けの版の記事を引き継ぐ成人向けの版の組 (一般向けの版の ID, 成人向けの版の ID)。
+    /// 決まりに合う組で、成人向けの版が `inherit_articles` を書いたものだけ
+    /// ([`crate::Store::inherit_articles`] で、組ごとに 1 度だけ記事を移す)。
+    pub fn inherited_editions(&self) -> Vec<(String, String)> {
+        let mut editions: Vec<(String, String)> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.source.inherit_articles)
+            .filter_map(|entry| {
+                self.editions
+                    .pairs
+                    .get(&entry.source.id)
+                    .map(|general| (general.clone(), entry.source.id.clone()))
+            })
+            .collect();
+        editions.sort();
+        editions
+    }
 }
 
 /// 互換性の判断のために先に読む項目。未知の項目は無視する。
@@ -131,12 +174,16 @@ struct Header {
     id: Option<String>,
     #[serde(default)]
     name: Option<String>,
+    /// 読めない (より新しいアプリが要る) ソースでも、成人向けかは分かるようにする。
+    #[serde(default)]
+    adult: Option<bool>,
 }
 
 enum Loaded {
     Ok(Box<CatalogEntry>),
     Unavailable(UnavailableEntry, String),
-    Invalid(String),
+    /// 読めない理由と、互換性の項目から読めた成人向けの区分。
+    Invalid(String, bool),
 }
 
 impl Catalog {
@@ -193,7 +240,7 @@ impl Catalog {
             match load_entry(&path, &group, &id, text, app_version) {
                 Loaded::Ok(entry) => catalog.push_entry(*entry),
                 Loaded::Unavailable(unavailable, message) => {
-                    let kept = catalog.keep_previous(previous, &id);
+                    let kept = catalog.keep_previous(previous, &id, unavailable.adult);
                     if !kept {
                         catalog.unavailable.push(unavailable);
                     }
@@ -204,8 +251,8 @@ impl Catalog {
                         kept_previous: kept,
                     });
                 }
-                Loaded::Invalid(message) => {
-                    let kept = catalog.keep_previous(previous, &id);
+                Loaded::Invalid(message, adult) => {
+                    let kept = catalog.keep_previous(previous, &id, adult);
                     catalog.problems.push(CatalogProblem {
                         path,
                         kind: ProblemKind::Invalid,
@@ -220,7 +267,79 @@ impl Catalog {
             catalog.groups_text = previous.groups_text.clone();
         }
         catalog.sort();
+        catalog.check_editions();
         catalog
+    }
+
+    /// 成人向けの版の組を決め、決まりに合わないものを問題として出す。
+    fn check_editions(&mut self) {
+        let (editions, problems) = self.editions_and_problems();
+        self.editions = editions;
+        self.problems.extend(problems);
+    }
+
+    /// 成人向けの版の `general_edition` は、同じグループ・同じお知らせの出し先の、成人向けでない
+    /// カタログのソースを指し、1 つの一般向けの版を指す成人向けの版は 1 つだけにする。
+    /// 合わないものは組にせず、同意していても使わない (一般向けの版はそのまま使う)。
+    /// 指す先が重なるときは、どれが正しいか決められないので、どれも使わない。
+    fn editions_and_problems(&self) -> (Editions, Vec<CatalogProblem>) {
+        let mut problems = Vec::new();
+        let mut invalid = HashSet::new();
+        let mut claims: BTreeMap<&str, Vec<&CatalogEntry>> = BTreeMap::new();
+        for entry in &self.entries {
+            let Some(general) = entry.source.general_edition.as_deref() else {
+                continue;
+            };
+            let message = match self.get(general) {
+                None => Some(format!(
+                    "general_edition の `{general}` がカタログにありません"
+                )),
+                Some(target) if target.source.adult => Some(format!(
+                    "general_edition の `{general}` は成人向けのソースです。一般向けの版を指してください"
+                )),
+                Some(target) if target.group != entry.group => Some(format!(
+                    "general_edition の `{general}` はグループ `{}` にあります。同じグループに置いてください",
+                    target.group
+                )),
+                Some(target) if target.source.channel != entry.source.channel => Some(format!(
+                    "general_edition の `{general}` とお知らせの出し先 (channel) を同じにしてください"
+                )),
+                Some(_) => {
+                    claims.entry(general).or_default().push(entry);
+                    None
+                }
+            };
+            if let Some(message) = message {
+                invalid.insert(entry.source.id.clone());
+                problems.push(CatalogProblem {
+                    path: entry.path.clone(),
+                    kind: ProblemKind::Invalid,
+                    message,
+                    kept_previous: false,
+                });
+            }
+        }
+        let mut pairs = HashMap::new();
+        for (general, entries) in claims {
+            if let [entry] = entries.as_slice() {
+                pairs.insert(entry.source.id.clone(), general.to_string());
+                continue;
+            }
+            let paths: Vec<&str> = entries.iter().map(|entry| entry.path.as_str()).collect();
+            for entry in entries {
+                invalid.insert(entry.source.id.clone());
+                problems.push(CatalogProblem {
+                    path: entry.path.clone(),
+                    kind: ProblemKind::Invalid,
+                    message: format!(
+                        "`{general}` の成人向けの版が複数あります ({})。1 つにしてください",
+                        paths.join("・")
+                    ),
+                    kept_previous: false,
+                });
+            }
+        }
+        (Editions { pairs, invalid }, problems)
     }
 
     fn load_groups(&mut self, path: String, text: &str, previous: Option<&Catalog>) {
@@ -265,15 +384,43 @@ impl Catalog {
         self.entries.push(entry);
     }
 
-    /// 前の版の同じ ID のソースを使い続ける。あれば `true`。
-    fn keep_previous(&mut self, previous: Option<&Catalog>, id: &str) -> bool {
+    /// 前の版の同じ ID のソースを使い続ける。あれば `true`。新しい版が成人向け (`adult`) なら、
+    /// 前の版も成人向けとして扱う (同意していない利用者に、前の版で取得し続けない)。
+    fn keep_previous(&mut self, previous: Option<&Catalog>, id: &str, adult: bool) -> bool {
         match previous.and_then(|previous| previous.get(id)) {
             Some(entry) => {
-                self.push_entry(entry.clone());
+                let mut entry = entry.clone();
+                if adult && !entry.source.adult {
+                    entry.source.adult = true;
+                    entry.forced_adult = true;
+                }
+                self.push_entry(entry);
                 true
             }
             None => false,
         }
+    }
+
+    /// 新しい版が成人向けなので、前の版を成人向けとして使っているソースの ID。カタログの控えに残し、
+    /// 控えから読み直したときに [`Catalog::force_adult`] で戻す。
+    pub fn forced_adult_ids(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.forced_adult)
+            .map(|entry| entry.source.id.clone())
+            .collect()
+    }
+
+    /// 控えに残した ID のソースを成人向けとして扱う ([`Catalog::forced_adult_ids`])。
+    pub fn force_adult(&mut self, ids: &[String]) {
+        for entry in &mut self.entries {
+            if ids.contains(&entry.source.id) && !entry.source.adult {
+                entry.source.adult = true;
+                entry.forced_adult = true;
+            }
+        }
+        // 成人向けになったソースを指す組は、決まりに合わなくなる。
+        self.editions = self.editions_and_problems().0;
     }
 
     /// グループを `groups.yaml` の順に、グループの中は名前の順に並べる。
@@ -379,10 +526,13 @@ impl Catalog {
         let mut enabled = Vec::new();
         for entry in &self.entries {
             let id = &entry.source.id;
-            if subscriptions.get(id).is_some() {
+            // 一般向けの版の代わりに使う成人向けの版は、一般向けの版の購読を使うので足さない。
+            if subscriptions.get(id).is_some() || entry.source.general_edition.is_some() {
                 continue;
             }
-            let on = defaults.contains(&entry.group.as_str());
+            // 成人向けだけのゲームは、既定のグループでも off で足す (成人向けの版を使う同意で、
+            // ほかのゲームまでまとめて取得し始めないように)。
+            let on = defaults.contains(&entry.group.as_str()) && !entry.source.adult;
             subscriptions.items.push(Subscription {
                 enabled: on,
                 ..Subscription::new(id.clone())
@@ -487,14 +637,16 @@ fn load_entry(path: &str, group: &str, id: &str, text: &str, app_version: &str) 
     // 1. 互換性に関わる項目だけを先に読む。新しい書式の未知の項目があっても読める。
     let header = match yaml::from_str::<Header>(text) {
         Ok(header) => header,
-        Err(err) => return Loaded::Invalid(format!("書式が誤っています: {err}")),
+        Err(err) => return Loaded::Invalid(format!("書式が誤っています: {err}"), false),
     };
+    let adult = header.adult.unwrap_or(false);
     let unavailable = |required: Option<String>| UnavailableEntry {
         group: group.to_string(),
         path: path.to_string(),
         id: header.id.clone().unwrap_or_else(|| id.to_string()),
         name: header.name.clone().unwrap_or_else(|| id.to_string()),
         required_app_version: required,
+        adult,
     };
     if let Some(required) = &header.min_app_version
         && compare_versions(required, app_version) == Ordering::Greater
@@ -517,7 +669,7 @@ fn load_entry(path: &str, group: &str, id: &str, text: &str, app_version: &str) 
     // 2. 厳格な型で全体を読む。
     let source = match SourceConfig::from_yaml(text) {
         Ok(source) => source,
-        Err(err) => return Loaded::Invalid(format!("書式が誤っています: {err}")),
+        Err(err) => return Loaded::Invalid(format!("書式が誤っています: {err}"), adult),
     };
     let entry = CatalogEntry {
         group: group.to_string(),
@@ -525,6 +677,7 @@ fn load_entry(path: &str, group: &str, id: &str, text: &str, app_version: &str) 
         source,
         text: text.to_string(),
         hash: hash(text),
+        forced_adult: false,
     };
     // 3. 中身とカタログの決まりを確かめる。
     let issues = check_entry(&entry, id, app_version);
@@ -535,6 +688,7 @@ fn load_entry(path: &str, group: &str, id: &str, text: &str, app_version: &str) 
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(" / "),
+            adult,
         );
     }
     Loaded::Ok(Box::new(entry))
@@ -646,48 +800,132 @@ fn check_template_url(template: &str) -> Option<String> {
     net::check_public_url(&url).err()
 }
 
-/// 購読と手元の定義から、使うソースを決める。
+/// 使う候補 (手元の上書きを反映した定義・出どころ・グループ)。
 ///
-/// カタログのソースをカタログの並びで、続けて手元のソースを並べる。カタログと同じ ID の
-/// 手元のソースは、カタログの定義の代わりに使う (定義全体を置き換える)。
-/// カタログのソースは購読で on にしたものだけ、手元のソースは購読で off にしない限り使う。
-pub fn resolve(
+/// 成人向けの区分と版の組はカタログの定義で決める: カタログが成人向けなら、手元の上書きで
+/// `adult` を外しても成人向けのまま (上書きで成人向けにはできる)。`general_edition` は
+/// カタログの定義のものにそろえる。手元だけのソースは `general_edition` を使えない (組にしない)。
+fn candidates(
     catalog: &Catalog,
-    subscriptions: &Subscriptions,
     local: &[SourceConfig],
-) -> Vec<ResolvedSource> {
+) -> Vec<(SourceConfig, SourceOrigin, Option<String>)> {
     let local_by_id: BTreeMap<&str, &SourceConfig> = local
         .iter()
         .map(|source| (source.id.as_str(), source))
         .collect();
-    let mut resolved = Vec::new();
+    let mut candidates = Vec::new();
     for entry in catalog.entries() {
         let id = entry.source.id.as_str();
-        let subscription = subscriptions.get(id);
-        let (config, origin) = match local_by_id.get(id) {
-            Some(local) => ((*local).clone(), SourceOrigin::Override),
-            None => (entry.source.clone(), SourceOrigin::Catalog),
-        };
-        resolved.push(ResolvedSource::new(
-            config,
-            origin,
-            Some(entry.group.clone()),
-            subscription,
-            subscription.is_some_and(|subscription| subscription.enabled),
-        ));
+        candidates.push(match local_by_id.get(id) {
+            Some(local) => {
+                let mut config = (*local).clone();
+                config.adult |= entry.source.adult;
+                config.general_edition = entry.source.general_edition.clone();
+                (config, SourceOrigin::Override, Some(entry.group.clone()))
+            }
+            None => (
+                entry.source.clone(),
+                SourceOrigin::Catalog,
+                Some(entry.group.clone()),
+            ),
+        });
     }
     for source in local {
-        if catalog.get(&source.id).is_some() {
+        if catalog.get(&source.id).is_none() {
+            candidates.push((source.clone(), SourceOrigin::Local, None));
+        }
+    }
+    candidates
+}
+
+/// 成人向けのソースのうち、使わない (同意していない・版の組が決まりに合わない) もの。記事を
+/// 開く・通知する・書き出すときにも隠す。`resolved` は同じカタログと手元の定義での [`resolve`] の結果。
+pub fn hidden_adult_sources(
+    catalog: &Catalog,
+    local: &[SourceConfig],
+    resolved: &[ResolvedSource],
+) -> BTreeSet<String> {
+    candidates(catalog, local)
+        .into_iter()
+        .filter(|(config, _, _)| config.adult)
+        .map(|(config, _, _)| config.id)
+        .filter(|id| resolved.iter().all(|source| source.id() != id))
+        .collect()
+}
+
+/// 購読・手元の定義と、成人向けの版を使うか (`adult`。設定で同意したか) から、使うソースを決める。
+///
+/// カタログのソースをカタログの並びで、続けて手元のソースを並べる。カタログと同じ ID の
+/// 手元のソースは、カタログの定義の代わりに使う (定義全体を置き換える)。
+/// カタログのソースは購読で on にしたものだけ、手元のソースは購読で off にしない限り使う。
+///
+/// 成人向けのソース (`adult: true`) は、`adult` のときだけ入れる。一般向けの版
+/// (`general_edition`) の代わりになる成人向けの版は、`adult` のときに一般向けの版の位置に入り、
+/// 一般向けの版の購読 (on/off・アイコン・取得間隔など) を使う ([`ResolvedSource::subscription_id`])。
+/// そのとき一般向けの版は入れない。版の組が決まりに合わない成人向けの版は使わない
+/// (一般向けの版をそのまま使う)。
+pub fn resolve(
+    catalog: &Catalog,
+    subscriptions: &Subscriptions,
+    local: &[SourceConfig],
+    adult: bool,
+) -> Vec<ResolvedSource> {
+    let candidates = candidates(catalog, local);
+    let editions = &catalog.editions;
+    // 一般向けの版の ID → 代わりに使う成人向けの版 (候補の位置)。
+    let replacements: HashMap<&str, usize> = if adult {
+        candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, (config, origin, _))| *origin != SourceOrigin::Local && config.adult)
+            .filter_map(|(index, (config, _, _))| {
+                editions
+                    .pairs
+                    .get(&config.id)
+                    .map(|general| (general.as_str(), index))
+            })
+            .collect()
+    } else {
+        HashMap::new()
+    };
+
+    let mut resolved = Vec::new();
+    for (index, (config, origin, _)) in candidates.iter().enumerate() {
+        let id = config.id.as_str();
+        // 使わない成人向けのソース・一般向けの版の位置に入れる成人向けの版・組の誤った成人向けの版・
+        // 版の組を書いた手元だけのソース。
+        let skip = config.adult
+            && (!adult
+                || editions.pairs.contains_key(id)
+                || editions.invalid.contains(id)
+                || (*origin == SourceOrigin::Local && config.general_edition.is_some()));
+        if skip {
             continue;
         }
-        let subscription = subscriptions.get(&source.id);
-        resolved.push(ResolvedSource::new(
-            source.clone(),
-            SourceOrigin::Local,
-            None,
+        // `id` の購読で入れる。手元だけのソースは購読で off にしない限り使い、カタログのソースは
+        // on にしたものだけ使う。
+        let subscription = subscriptions.get(id);
+        let enabled = if *origin == SourceOrigin::Local {
+            subscription.is_none_or(|subscription| subscription.enabled)
+        } else {
+            subscription.is_some_and(|subscription| subscription.enabled)
+        };
+        // 成人向けの版を使うなら、定義はその版のもの。
+        let (config, origin, group) = &candidates[replacements.get(id).copied().unwrap_or(index)];
+        let mut source = ResolvedSource::new(
+            config.clone(),
+            *origin,
+            group.clone(),
+            id,
             subscription,
-            subscription.is_none_or(|subscription| subscription.enabled),
-        ));
+            enabled,
+        );
+        // 通信の許可は、一般向けの版の購読から引き継がず、実際に使う定義の購読で決める。
+        source.allow_private_network = !origin.is_catalog()
+            && subscriptions
+                .get(&config.id)
+                .is_some_and(|subscription| subscription.allow_private_network);
+        resolved.push(source);
     }
     resolved
 }
@@ -726,6 +964,9 @@ pub struct ResolvedSource {
     pub origin: SourceOrigin,
     /// カタログのグループ。手元だけのソースは `None`。
     pub group: Option<String>,
+    /// 購読 (on/off・アイコン・取得間隔などの上書き) の ID。ふつうはソースの ID と同じで、
+    /// 一般向けの版の代わりに使う成人向けの版では、一般向けの版の ID。
+    pub subscription_id: String,
     pub enabled: bool,
     /// 手元のネットワークへの取得を許すか (手元の定義だけ)。
     pub allow_private_network: bool,
@@ -736,6 +977,7 @@ impl ResolvedSource {
         mut config: SourceConfig,
         origin: SourceOrigin,
         group: Option<String>,
+        subscription_id: &str,
         subscription: Option<&Subscription>,
         enabled: bool,
     ) -> Self {
@@ -754,6 +996,7 @@ impl ResolvedSource {
             config,
             origin,
             group,
+            subscription_id: subscription_id.to_string(),
             enabled,
             allow_private_network: !origin.is_catalog()
                 && subscription.is_some_and(|subscription| subscription.allow_private_network),
@@ -808,12 +1051,42 @@ lists:
         ] {
             assert!(enabled(id), "{id}");
         }
-        // 既定でないグループのソースも「見た」ものとして off で入る。
+        // 既定でないグループのソースも「見た」ものとして off で入る。成人向けだけのゲームも off で入る。
         assert!(defaults.get("4gamer").is_some_and(|item| !item.enabled));
-        assert_eq!(defaults.items.len(), catalog.entries().len());
+        assert!(
+            defaults
+                .get("escalation_heroines")
+                .is_some_and(|item| !item.enabled)
+        );
+        // 一般向けの版の代わりに使う成人向けの版は、一般向けの版の購読を使うので入れない。
+        let editions = catalog.inherited_editions();
+        assert!(editions.contains(&("dot_abyss".to_string(), "dot_abyss_r18".to_string())));
+        let paired = catalog
+            .entries()
+            .iter()
+            .filter(|entry| entry.source.general_edition.is_some())
+            .count();
+        assert!(paired >= 7);
+        assert_eq!(defaults.items.len(), catalog.entries().len() - paired);
         for entry in catalog.entries() {
             assert!(entry.source.min_app_version.is_some(), "{}", entry.path);
+            assert!(
+                defaults.get(&entry.source.id).is_some() != entry.source.general_edition.is_some()
+            );
         }
+        // 同意していなければ、成人向けのソースは使わない。
+        let resolved = resolve(&catalog, &defaults, &[], false);
+        assert!(resolved.iter().all(|source| !source.config.adult));
+        assert!(resolved.iter().any(|source| source.id() == "dot_abyss"));
+        // 同意していれば、一般向けの版の代わりに成人向けの版を一般向けの版の購読で使う。
+        let resolved = resolve(&catalog, &defaults, &[], true);
+        let dot = resolved
+            .iter()
+            .find(|source| source.id() == "dot_abyss_r18")
+            .unwrap();
+        assert_eq!(dot.subscription_id, "dot_abyss");
+        assert!(dot.enabled);
+        assert!(resolved.iter().all(|source| source.id() != "dot_abyss"));
     }
 
     #[test]
@@ -1014,7 +1287,12 @@ lists:
                 Subscription::new("removed_upstream"),
             ],
         };
-        let resolved = resolve(&catalog, &subscriptions, &[override_source, mine, paused]);
+        let resolved = resolve(
+            &catalog,
+            &subscriptions,
+            &[override_source, mine, paused],
+            false,
+        );
         let summary: Vec<(&str, SourceOrigin, bool, bool)> = resolved
             .iter()
             .map(|source| {
@@ -1043,5 +1321,252 @@ lists:
         assert_eq!(resolved[0].config.interval_minutes, Some(15));
         assert_eq!(resolved[1].config.name, "手元で直した");
         assert_eq!(resolved[1].group.as_deref(), Some("dmm"));
+        assert!(
+            resolved
+                .iter()
+                .all(|source| source.subscription_id == source.id())
+        );
+    }
+
+    /// 成人向けの版のファイル。`general` があれば `general_edition` に書く。
+    fn adult(id: &str, general: Option<&str>) -> String {
+        let mut text = with_id(MIST, id).replace("name: ミスト", "name: ミスト (成人向け)");
+        text.push_str("adult: true\n");
+        if let Some(general) = general {
+            text.push_str(&format!("general_edition: {general}\n"));
+        }
+        text
+    }
+
+    fn edition_catalog() -> Catalog {
+        Catalog::from_files_for(
+            [
+                ("groups.yaml", GROUPS.to_string()),
+                ("sources/dmm/mist.yaml", MIST.to_string()),
+                ("sources/dmm/mist_r18.yaml", adult("mist_r18", Some("mist"))),
+                ("sources/dmm/only_r18.yaml", adult("only_r18", None)),
+                ("sources/dmm/plain.yaml", with_id(MIST, "plain")),
+            ],
+            None,
+            "26.11.6",
+        )
+    }
+
+    #[test]
+    fn adult_editions_are_used_only_with_consent_and_share_the_general_subscription() {
+        let catalog = edition_catalog();
+        assert_eq!(catalog.problems(), &[]);
+        // 一般向けの版の代わりになる成人向けの版は購読に足さない。成人向けだけのゲームは、既定の
+        // グループでも off で足す (同意しても、ほかのゲームまでまとめて取得し始めない)。
+        let mut subscriptions = catalog.default_subscriptions();
+        let mut adopted: Vec<(&str, bool)> = subscriptions
+            .items
+            .iter()
+            .map(|item| (item.id.as_str(), item.enabled))
+            .collect();
+        adopted.sort_unstable();
+        assert_eq!(
+            adopted,
+            vec![("mist", true), ("only_r18", false), ("plain", true)]
+        );
+        subscriptions.set_enabled("only_r18", true);
+        subscriptions.entry("mist").icon = Some("C:/icons/mist.png".into());
+        subscriptions.set_enabled("plain", false);
+
+        let summary = |adult: bool| -> Vec<(String, String, bool)> {
+            resolve(&catalog, &subscriptions, &[], adult)
+                .iter()
+                .map(|source| {
+                    (
+                        source.id().to_string(),
+                        source.subscription_id.clone(),
+                        source.enabled,
+                    )
+                })
+                .collect()
+        };
+        // 同意していなければ、成人向けのソースは入れない (取得もソース画面への表示もしない)。
+        assert_eq!(
+            summary(false),
+            vec![
+                ("mist".into(), "mist".into(), true),
+                ("plain".into(), "plain".into(), false),
+            ]
+        );
+        // 同意していれば、一般向けの版の位置に成人向けの版が入り、一般向けの版の購読を使う。
+        assert_eq!(
+            summary(true),
+            vec![
+                ("mist_r18".into(), "mist".into(), true),
+                ("plain".into(), "plain".into(), false),
+                ("only_r18".into(), "only_r18".into(), true),
+            ]
+        );
+        let resolved = resolve(&catalog, &subscriptions, &[], true);
+        assert_eq!(resolved[0].config.name, "ミスト (成人向け)");
+        assert_eq!(
+            resolved[0].config.icon.as_deref(),
+            Some("C:/icons/mist.png")
+        );
+        // 一般向けの版を off にすると、成人向けの版も off。
+        subscriptions.set_enabled("mist", false);
+        assert!(!resolve(&catalog, &subscriptions, &[], true)[0].enabled);
+        // 使わない成人向けのソースは、記事を開く・通知するときにも隠す。
+        assert_eq!(
+            hidden_adult_sources(
+                &catalog,
+                &[],
+                &resolve(&catalog, &subscriptions, &[], false)
+            ),
+            BTreeSet::from(["mist_r18".to_string(), "only_r18".to_string()])
+        );
+        assert!(
+            hidden_adult_sources(&catalog, &[], &resolve(&catalog, &subscriptions, &[], true))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn local_definitions_cannot_lift_or_invent_editions() {
+        let catalog = edition_catalog();
+        let mut subscriptions = catalog.default_subscriptions();
+        subscriptions.set_enabled("only_r18", true);
+        // 手元だけの成人向けのソースも、同意したときだけ使う。版の組 (general_edition) は書けない。
+        let mut mine = catalog.get("plain").unwrap().source.clone();
+        mine.id = "mine".into();
+        mine.adult = true;
+        let mut linked = mine.clone();
+        linked.id = "linked".into();
+        linked.general_edition = Some("plain".into());
+        // カタログの成人向けのソースを、手元の上書きで一般向けにはできない。
+        let mut lifted = catalog.get("only_r18").unwrap().source.clone();
+        lifted.adult = false;
+        let local = [mine, linked, lifted];
+        let ids = |adult: bool| -> Vec<String> {
+            resolve(&catalog, &subscriptions, &local, adult)
+                .iter()
+                .map(|source| source.id().to_string())
+                .collect()
+        };
+        assert_eq!(ids(false), vec!["mist", "plain"]);
+        assert_eq!(ids(true), vec!["mist_r18", "plain", "only_r18", "mine"]);
+        let hidden = hidden_adult_sources(
+            &catalog,
+            &local,
+            &resolve(&catalog, &subscriptions, &local, false),
+        );
+        assert!(
+            hidden.contains("only_r18") && hidden.contains("mine") && hidden.contains("linked")
+        );
+    }
+
+    #[test]
+    fn edition_links_must_point_to_one_general_source_in_the_same_group() {
+        let catalog = Catalog::from_files_for(
+            [
+                ("groups.yaml", GROUPS.to_string()),
+                ("sources/dmm/mist.yaml", MIST.to_string()),
+                ("sources/dmm/a_r18.yaml", adult("a_r18", Some("mist"))),
+                ("sources/dmm/b_r18.yaml", adult("b_r18", Some("mist"))),
+                ("sources/dmm/c_r18.yaml", adult("c_r18", Some("missing"))),
+                ("sources/dmm/d_r18.yaml", adult("d_r18", Some("solo"))),
+                ("sources/dmm/solo.yaml", with_id(MIST, "solo")),
+                (
+                    "sources/dmm/paired_r18.yaml",
+                    adult("paired_r18", Some("solo2")),
+                ),
+                ("sources/dmm/solo2.yaml", with_id(MIST, "solo2")),
+                ("sources/media/e_r18.yaml", adult("e_r18", Some("solo"))),
+                (
+                    "sources/dmm/general.yaml",
+                    format!("{}general_edition: mist\n", with_id(MIST, "general")),
+                ),
+            ],
+            None,
+            "26.11.6",
+        );
+        let problems: Vec<(&str, &str)> = catalog
+            .problems()
+            .iter()
+            .map(|problem| (problem.path.as_str(), problem.message.as_str()))
+            .collect();
+        // 成人向けでないソースの general_edition は、ファイルの検査で断る (取り込まない)。
+        assert!(problems[0].0.ends_with("general.yaml"));
+        assert!(problems[0].1.contains("adult: true"));
+        assert!(catalog.get("general").is_none());
+        // 指す先がない・別のグループ・重なるものは、取り込んだうえで問題として出す。重なるときは
+        // どれが正しいか決められないので、先に並んだものも使わない。
+        let mut rest: Vec<&str> = problems[1..].iter().map(|(path, _)| *path).collect();
+        rest.sort_unstable();
+        assert_eq!(
+            rest,
+            vec![
+                "sources/dmm/a_r18.yaml",
+                "sources/dmm/b_r18.yaml",
+                "sources/dmm/c_r18.yaml",
+                "sources/media/e_r18.yaml",
+            ],
+            "{problems:#?}"
+        );
+        let mut subscriptions = catalog.default_subscriptions();
+        for id in [
+            "mist", "solo", "solo2", "a_r18", "b_r18", "c_r18", "d_r18", "e_r18",
+        ] {
+            subscriptions.set_enabled(id, true);
+        }
+        // 組の誤った成人向けの版は、同意していても使わず、一般向けの版をそのまま使う。
+        let ids: Vec<String> = resolve(&catalog, &subscriptions, &[], true)
+            .iter()
+            .map(|source| format!("{}<{}", source.id(), source.subscription_id))
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["mist<mist", "d_r18<solo", "paired_r18<solo2"],
+            "d_r18 と paired_r18 だけが組になる"
+        );
+    }
+
+    #[test]
+    fn previous_versions_stay_adult_when_the_new_version_is_adult() {
+        // 前の版は一般向け。新しい版は成人向けだが、このアプリでは読めない (より新しいアプリが要る)。
+        let old = Catalog::from_files_for(
+            [
+                ("groups.yaml", GROUPS.to_string()),
+                ("sources/dmm/mist.yaml", MIST.to_string()),
+            ],
+            None,
+            "26.11.6",
+        );
+        let newer = adult("mist", None).replace("'26.11.6'", "'99.1.0'");
+        let mut catalog = Catalog::from_files_for(
+            [
+                ("groups.yaml", GROUPS.to_string()),
+                ("sources/dmm/mist.yaml", newer),
+            ],
+            Some(&old),
+            "26.11.6",
+        );
+        let entry = catalog.get("mist").unwrap();
+        assert!(entry.source.adult && entry.forced_adult);
+        assert_eq!(catalog.forced_adult_ids(), vec!["mist".to_string()]);
+        let mut subscriptions = Subscriptions::default();
+        subscriptions.set_enabled("mist", true);
+        assert!(resolve(&catalog, &subscriptions, &[], false).is_empty());
+        // 控えには前の版の中身を残すので、読み直したら成人向けの印を戻す。
+        let mut reread = Catalog::from_files_for(catalog.files(), None, "26.11.6");
+        assert!(!reread.get("mist").unwrap().source.adult);
+        reread.force_adult(&catalog.forced_adult_ids());
+        assert!(reread.get("mist").unwrap().source.adult);
+        assert!(resolve(&reread, &subscriptions, &[], false).is_empty());
+        catalog.force_adult(&[]);
+        assert!(catalog.get("mist").unwrap().source.adult);
+    }
+
+    #[test]
+    fn unavailable_adult_sources_are_marked() {
+        let newer = adult("later", None).replace("'26.11.6'", "'99.1.0'");
+        let catalog = Catalog::from_files_for([("sources/dmm/later.yaml", newer)], None, "26.11.6");
+        assert_eq!(catalog.unavailable().len(), 1);
+        assert!(catalog.unavailable()[0].adult);
     }
 }

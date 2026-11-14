@@ -4,9 +4,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gnn_core::ThemePreference;
 use gnn_core::source::Channel;
-use gpui_kit::component::{Theme, ThemeMode, TitleBar};
+use gpui_kit::component::TitleBar;
 use gpui_kit::{
     AnyWindowHandle, App, AppContext as _, Bounds, Entity, Global, QuitMode, SharedString,
     SystemNotification, Window, WindowBounds, WindowOptions, px, size,
@@ -95,6 +94,7 @@ pub fn run(
     let quit_cleanup = cleanup.clone();
     application.run(move |cx| {
         gpui_kit::init(cx);
+        crate::ui::theme::install(cx);
         cx.set_app_identity(shortcut::APP_ID, shortcut::APP_NAME);
         if services.settings().notify_new_entries {
             shortcut::ensure_in_background();
@@ -138,7 +138,7 @@ pub fn run(
             tracing::info!("{notice}");
             app_state.update(cx, |state, _| state.set_notice(notice));
         }
-        apply_theme(services.settings().theme, cx);
+        crate::ui::theme::apply(services.settings().theme, cx);
 
         match Tray::install(services.clone()) {
             Ok(tray) => {
@@ -213,15 +213,6 @@ pub fn run(
         }
     });
     cleanup.run();
-}
-
-/// テーマを設定に合わせる。
-pub fn apply_theme(preference: ThemePreference, cx: &mut App) {
-    match preference {
-        ThemePreference::System => Theme::sync_system_appearance(None, cx),
-        ThemePreference::Light => Theme::change(ThemeMode::Light, None, cx),
-        ThemePreference::Dark => Theme::change(ThemeMode::Dark, None, cx),
-    }
 }
 
 /// メインウィンドウを閉じる (Ctrl+W、macOS は ⌘W とメニューの「閉じる」)。閉じるボタンと同じく、
@@ -307,13 +298,14 @@ pub fn open_main_window(cx: &mut App) {
     }
 }
 
-/// 開発用: `GNN_DEV_PAGE` (news・releases・sources・settings) で起動時の画面を、
+/// 開発用: `GNN_DEV_PAGE` (news・agenda・sources・settings) で起動時の画面を、
 /// `GNN_DEV_SOURCE` でソース画面で選ぶソースを決める。画面を操作せずに確かめるため。
 #[cfg(debug_assertions)]
 fn open_dev_page(handle: AnyWindowHandle, workspace: &Entity<Workspace>, cx: &mut App) {
     use crate::ui::workspace::Page;
     let page = match std::env::var("GNN_DEV_PAGE").ok().as_deref() {
         Some("news") => Page::News,
+        Some("agenda") => Page::Agenda,
         Some("sources") => Page::Sources,
         Some("settings") => Page::Settings,
         _ => return,

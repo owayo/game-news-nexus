@@ -1,6 +1,6 @@
 //! 画面全体で共有する状態。設定・カタログ・使うソース・取得状況・未読数・予定の表を持つ。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
@@ -10,10 +10,33 @@ use gnn_core::agenda::{self, Agenda, Days, SourceMark};
 use gnn_core::catalog::{Catalog, ResolvedSource, SourceOrigin};
 use gnn_core::config::LocalSourceFile;
 use gnn_core::source::Channel;
-use gnn_core::{AppSettings, RunStatus, SourceConfig, SourceState, Subscriptions};
+use gnn_core::{AppSettings, FetchRun, RunStatus, SourceConfig, SourceState, Subscriptions};
 use gpui_kit::{App, AppContext as _, Context, Entity, EventEmitter, Global, Task};
 
 use crate::services::{AddedEntry, CatalogStatus, ServiceEvent, Services};
+
+/// 画面。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Page {
+    #[default]
+    News,
+    /// 今日・明日の予定。
+    Agenda,
+    Sources,
+    Settings,
+}
+
+/// ウィンドウを開き直したときに戻す画面の状態 (起動しているあいだだけ覚える)。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ViewMemory {
+    pub page: Page,
+    /// ニュースで絞り込んでいるゲーム。
+    pub news_filter: Option<String>,
+    /// ニュースを予定で絞る条件。
+    pub news_schedule: Option<gnn_core::agenda::ScheduleFilter>,
+    /// ニュースで開いていた記事。
+    pub news_selected: Option<i64>,
+}
 
 /// 予定の表を読み直す知らせが続いたときに、まとめるために待つ時間。
 const AGENDA_COALESCE: StdDuration = StdDuration::from_millis(300);
@@ -34,6 +57,8 @@ pub enum AppEvent {
     /// 予定の表を読み直した。予定の開始・終了の時刻・日付の変わり目・スリープからの復帰でも
     /// 読み直す。一覧の並び (今日・明日の予定) とバッジを計算し直す。
     AgendaChanged,
+    /// 記事の既読・未読が変わった (どの画面で変えても、ほかの画面の表示を合わせる)。
+    ReadChanged { ids: Vec<i64>, read: bool },
 }
 
 pub struct AppState {
@@ -41,12 +66,19 @@ pub struct AppState {
     settings: AppSettings,
     /// 使うソース。off のものも含む。
     sources: Vec<ResolvedSource>,
+    /// 使わない成人向けのソース。記事を開く・通知するときにも隠す。
+    hidden: BTreeSet<String>,
     catalog: Arc<Catalog>,
     catalog_status: CatalogStatus,
     subscriptions: Subscriptions,
     local_files: Vec<LocalSourceFile>,
     states: HashMap<String, SourceState>,
     unread: HashMap<Channel, HashMap<String, usize>>,
+    /// ソースごとの保存済みの記事の数 (お知らせ)。
+    entry_counts: HashMap<String, usize>,
+    /// ソースごとの最後の取得の記録。
+    last_runs: HashMap<String, FetchRun>,
+    view: ViewMemory,
     running: HashSet<String>,
     last_cycle_at: Option<DateTime<Utc>>,
     /// 次にウィンドウを開いたときに知らせること。
@@ -74,6 +106,7 @@ impl AppState {
             let mut state = Self {
                 settings: services.settings(),
                 sources: services.sources(),
+                hidden: services.hidden_sources(),
                 catalog: services.catalog(),
                 catalog_status: services.catalog_status(),
                 subscriptions: services.subscriptions(),
@@ -81,6 +114,9 @@ impl AppState {
                 services,
                 states: HashMap::new(),
                 unread: HashMap::new(),
+                entry_counts: HashMap::new(),
+                last_runs: HashMap::new(),
+                view: ViewMemory::default(),
                 running: HashSet::new(),
                 last_cycle_at: None,
                 notice: None,
@@ -123,6 +159,25 @@ impl AppState {
 
     pub fn settings(&self) -> &AppSettings {
         &self.settings
+    }
+
+    /// 使わない成人向けのソースか (同意していない・版の組が決まりに合わない)。そのソースの記事は、
+    /// 一覧に出さないだけでなく、通知や前に開いていた記事から直接開くこともしない。
+    pub fn hides(&self, source_id: &str) -> bool {
+        self.hidden.contains(source_id)
+    }
+
+    /// 成人向けのソースを使うか変える (同意した時刻。`None` で使わない)。切るときは、保存に
+    /// 失敗しても先に使うのをやめる ([`Services::set_adult_consent`])。
+    pub fn set_adult_consent(
+        &mut self,
+        consented_at: Option<DateTime<Utc>>,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
+        let result = self.services.set_adult_consent(consented_at);
+        self.settings = self.services.settings();
+        self.reload_sources(cx);
+        result
     }
 
     /// 使うソース。off のものも含む。
@@ -200,6 +255,32 @@ impl AppState {
             .unwrap_or(0)
     }
 
+    /// 保存済みの記事の数 (お知らせ)。
+    pub fn entry_count(&self, source_id: &str) -> usize {
+        self.entry_counts.get(source_id).copied().unwrap_or(0)
+    }
+
+    /// 最後の取得の記録。
+    pub fn last_run(&self, source_id: &str) -> Option<&FetchRun> {
+        self.last_runs.get(source_id)
+    }
+
+    /// ウィンドウを開き直したときに戻す画面の状態。
+    pub fn view(&self) -> &ViewMemory {
+        &self.view
+    }
+
+    /// 画面の状態を覚える (画面に知らせない)。
+    pub fn remember_view(&mut self, edit: impl FnOnce(&mut ViewMemory)) {
+        edit(&mut self.view);
+    }
+
+    /// 今日に関係する予定の件数 (終わった・中止・延期を除く)。
+    pub fn today_count(&self) -> usize {
+        let now = Utc::now();
+        self.agenda.today_count(now, &Self::days(now), &Local)
+    }
+
     /// on のソースの未読の合計。
     pub fn unread_total(&self, channel: Channel) -> usize {
         self.enabled_ids(channel)
@@ -246,15 +327,19 @@ impl AppState {
                         let states = store.source_states()?;
                         let mut unread = HashMap::new();
                         unread.insert(Channel::News, store.unread_counts(Channel::News)?);
-                        Ok((states, unread))
+                        let counts = store.entry_counts(Channel::News)?;
+                        let runs = store.last_runs()?;
+                        Ok((states, unread, counts, runs))
                     })
                 })
                 .await;
             match loaded {
-                Ok((states, unread)) => {
+                Ok((states, unread, counts, runs)) => {
                     let _ = this.update(cx, |this, cx| {
                         this.states = states;
                         this.unread = unread;
+                        this.entry_counts = counts;
+                        this.last_runs = runs;
                         cx.notify();
                     });
                 }
@@ -262,6 +347,44 @@ impl AppState {
             }
         })
         .detach();
+    }
+
+    /// 記事の既読・未読を変える。画面にはすぐ知らせ、ストアにはあとで書く。
+    pub fn set_read(&mut self, ids: Vec<i64>, read: bool, cx: &mut Context<Self>) {
+        if ids.is_empty() {
+            return;
+        }
+        cx.emit(AppEvent::ReadChanged {
+            ids: ids.clone(),
+            read,
+        });
+        let services = self.services.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    services.with_store(|store| -> Result<()> {
+                        let now = Utc::now();
+                        for id in &ids {
+                            store.set_read(*id, read, now)?;
+                        }
+                        Ok(())
+                    })
+                })
+                .await;
+            if let Err(err) = result {
+                tracing::error!("既読を変えられません: {err:#}");
+            }
+            let _ = this.update(cx, |this, cx| this.refresh_counts(cx));
+        })
+        .detach();
+    }
+
+    /// ストアで既読・未読を変えた (一括の既読と、その取り消し) ことを画面に知らせる。
+    pub fn read_changed(&mut self, ids: Vec<i64>, read: bool, cx: &mut Context<Self>) {
+        if !ids.is_empty() {
+            cx.emit(AppEvent::ReadChanged { ids, read });
+        }
+        self.refresh_counts(cx);
     }
 
     /// 記事が変わったことを知らせる。
@@ -368,7 +491,10 @@ impl AppState {
             .enabled_sources()
             .map(|source| source.id.clone())
             .collect();
+        let hidden_before = std::mem::take(&mut self.hidden);
         self.sources = self.services.sources();
+        self.hidden = self.services.hidden_sources();
+        self.settings = self.services.settings();
         self.catalog = self.services.catalog();
         self.catalog_status = self.services.catalog_status();
         self.subscriptions = self.services.subscriptions();
@@ -377,8 +503,9 @@ impl AppState {
             .enabled_sources()
             .map(|source| source.id.clone())
             .collect();
-        if enabled_before != enabled_after {
-            // on/off が変わると、一覧に出す記事と予定の表が変わる。
+        if enabled_before != enabled_after || hidden_before != self.hidden {
+            // on/off が変わると、一覧に出す記事と予定の表が変わる。隠すソースが変わると、開いている
+            // 記事も閉じる (本文の画面が `EntriesChanged` で確かめる)。
             cx.emit(AppEvent::EntriesChanged);
             self.reload_agenda(cx);
         }
@@ -408,6 +535,15 @@ impl AppState {
                     cx.emit(AppEvent::EntriesChanged);
                     self.reload_agenda(cx);
                 }
+                // 取得のあとで off にした・使うのをやめた (成人向けのソースの同意を切ったなど) ソースの
+                // 新着は知らせない。
+                let mut added = added;
+                added.retain(|entry| {
+                    !self.hides(&entry.source_id)
+                        && self
+                            .resolved(&entry.source_id)
+                            .is_some_and(|source| source.enabled)
+                });
                 if !added.is_empty() {
                     cx.emit(AppEvent::NewEntries(added));
                 }
@@ -421,6 +557,11 @@ impl AppState {
                 }
             }
             ServiceEvent::SourcesChanged => self.reload_sources(cx),
+            ServiceEvent::EntriesMoved => {
+                cx.emit(AppEvent::EntriesChanged);
+                self.reload_agenda(cx);
+                self.refresh_counts(cx);
+            }
             // 画像の読み直しと、ウィンドウの出し入れ・終了は app.rs が受け持つ。
             ServiceEvent::ImagesCached { .. }
             | ServiceEvent::RetryImages(_)
@@ -437,10 +578,18 @@ impl AppState {
         Ok(())
     }
 
+    /// ソースの購読の ID。一般向けの版の代わりに使う成人向けの版は、一般向けの版の購読を使う
+    /// ([`ResolvedSource::subscription_id`])。
+    fn subscription_id(&self, id: &str) -> String {
+        self.resolved(id)
+            .map_or_else(|| id.to_string(), |source| source.subscription_id.clone())
+    }
+
     /// ソースを on/off する。
     pub fn set_enabled(&mut self, id: &str, enabled: bool, cx: &mut Context<Self>) -> Result<()> {
+        let key = self.subscription_id(id);
         self.services
-            .update_subscriptions(|subscriptions| subscriptions.set_enabled(id, enabled))?;
+            .update_subscriptions(|subscriptions| subscriptions.set_enabled(&key, enabled))?;
         self.reload_sources(cx);
         Ok(())
     }
@@ -453,9 +602,10 @@ impl AppState {
         cx: &mut Context<Self>,
     ) -> Result<()> {
         let enabled = self.resolved(id).is_some_and(|source| source.enabled);
+        let key = self.subscription_id(id);
         self.services.update_subscriptions(|subscriptions| {
-            let existed = subscriptions.get(id).is_some();
-            let entry = subscriptions.entry(id);
+            let existed = subscriptions.get(&key).is_some();
+            let entry = subscriptions.entry(&key);
             entry.icon = icon;
             // アイコンのために足した購読で、off のソースを on にしない。
             if !existed {
@@ -479,8 +629,9 @@ impl AppState {
         {
             bail!("カタログのソースは手元のネットワークに取得できません");
         }
+        let key = self.subscription_id(id);
         self.services.update_subscriptions(|subscriptions| {
-            subscriptions.entry(id).allow_private_network = allow;
+            subscriptions.entry(&key).allow_private_network = allow;
         })?;
         self.reload_sources(cx);
         Ok(())

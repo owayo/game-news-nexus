@@ -5,6 +5,7 @@
 //! ```text
 //! gnn check <カタログのディレクトリ>          決まりと書式を検査する
 //! gnn try <カタログのディレクトリ> [ID ...]   実際のサイトから取得してみる
+//!         [--adult-consent]                   成人向けのソースも試す (18 歳以上で同意する場合だけ)
 //! gnn schema [--out <ファイル>]                取得定義の JSON Schema を書き出す
 //! gnn convert <sources.toml> <出力先>         書式 1 (TOML) の定義を書式 2 (YAML) にする
 //! ```
@@ -50,6 +51,11 @@ enum Command {
         /// 1 ソースで読む記事の数。
         #[arg(long, default_value_t = 3)]
         limit: usize,
+        /// 成人向けのソース (`adult: true`) も試す。18 歳以上で、成人向けの内容を取得することに
+        /// 同意する場合だけ付ける。付けなければ成人向けのソースは試さず、ID で指定すると誤りにする。
+        /// GitHub Actions の中では、成人向けのソースの記事の題名と本文を出さない。
+        #[arg(long)]
+        adult_consent: bool,
     },
     /// 取得定義の JSON Schema を書き出す。
     Schema {
@@ -66,7 +72,12 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Check { dir } => check(&dir),
-        Command::Try { dir, ids, limit } => try_sources(&dir, &ids, limit).await,
+        Command::Try {
+            dir,
+            ids,
+            limit,
+            adult_consent,
+        } => try_sources(&dir, &ids, limit, adult_consent).await,
         Command::Schema { out } => schema(out.as_deref()).map(|()| true),
         Command::Convert { input, out_dir } => convert(&input, &out_dir).map(|()| true),
     };
@@ -181,10 +192,32 @@ fn normalize_newlines(text: &str) -> String {
 }
 
 /// 実際のサイトから取得してみる。失敗がなければ `true`。
-async fn try_sources(dir: &Path, ids: &[String], limit: usize) -> Result<bool> {
+///
+/// 成人向けのソース (`adult: true`) は、`adult_consent` (`--adult-consent`) のときだけ試す。
+/// ID で指定していて印がなければ、通信する前に誤りにする。
+async fn try_sources(
+    dir: &Path,
+    ids: &[String],
+    limit: usize,
+    adult_consent: bool,
+) -> Result<bool> {
     let (catalog, _) = read_catalog(dir)?;
     for problem in catalog.problems() {
         report(&problem.path, &problem.message);
+    }
+    if !adult_consent {
+        let named: Vec<&str> = catalog
+            .entries()
+            .iter()
+            .filter(|entry| entry.source.adult && ids.contains(&entry.source.id))
+            .map(|entry| entry.source.id.as_str())
+            .collect();
+        if !named.is_empty() {
+            anyhow::bail!(
+                "{} は成人向けのソースです。試すには --adult-consent を付けてください (18 歳以上で、成人向けの内容を取得することに同意する場合だけ)",
+                named.join(", ")
+            );
+        }
     }
     let engine = Engine::new(HttpFetcher::new(
         HttpOptions::default(),
@@ -193,9 +226,14 @@ async fn try_sources(dir: &Path, ids: &[String], limit: usize) -> Result<bool> {
     let known = HashMap::new();
     let mut ok = catalog.problems().is_empty();
     let mut tried = 0;
+    let mut skipped_adult = 0;
     for entry in catalog.entries() {
         let source = &entry.source;
         if !ids.is_empty() && !ids.contains(&source.id) {
+            continue;
+        }
+        if source.adult && !adult_consent {
+            skipped_adult += 1;
             continue;
         }
         tried += 1;
@@ -237,7 +275,16 @@ async fn try_sources(dir: &Path, ids: &[String], limit: usize) -> Result<bool> {
         if let Some(line) = image_identity_summary(source, &output.drafts) {
             println!("   {line}");
         }
-        for draft in output.drafts.iter().take(2) {
+        // 公開される CI の記録には、成人向けのソースの記事の題名と本文を残さない。
+        if source.adult && in_github_actions() {
+            println!("   (成人向けのソースなので、記事の題名と本文は出しません)");
+        }
+        let previews = if source.adult && in_github_actions() {
+            0
+        } else {
+            2
+        };
+        for draft in output.drafts.iter().take(previews) {
             let body = draft.body_html.as_deref().unwrap_or("");
             let preview: String = gnn_core::text::html_to_text(body)
                 .chars()
@@ -281,7 +328,12 @@ async fn try_sources(dir: &Path, ids: &[String], limit: usize) -> Result<bool> {
             _ => {}
         }
     }
-    if tried == 0 && !ids.is_empty() {
+    if skipped_adult > 0 {
+        println!(
+            "成人向けのソース {skipped_adult} 件は試していません (18 歳以上で、成人向けの内容を取得することに同意する場合は --adult-consent)"
+        );
+    }
+    if tried == 0 && skipped_adult == 0 && !ids.is_empty() {
         anyhow::bail!("ID {} のソースはカタログにありません", ids.join(", "));
     }
     Ok(ok)

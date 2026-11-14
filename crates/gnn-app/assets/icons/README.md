@@ -11,6 +11,7 @@
 | `app.ico` | Windows の実行ファイルとウィンドウのアイコン。16 / 20 / 24 / 30 / 32 / 40 / 48 / 64 / 128 / 256px |
 | `app.icns` | macOS のアプリのアイコン。16〜1024px (@1x と @2x)。Apple の格子に合わせて 1024px の中に 824px で置き、影を付ける |
 | `app.png` | 512px。README などに使う |
+| `app-40.png`・`app-80.png`・`app-144.png` | 画面の中のロゴ (タイトルバーの 20px・設定の 40px・何も開いていない本文の欄の 72px の 2 倍)。gpui は画像をミップマップなしの線形補間で縮め、2 倍を超えて縮めると粗くなるので、`ui::components::AppLogo` が画面の倍率に合うものを選ぶ |
 | `tray.png` | Windows のタスクトレイ。64px |
 | `tray-template.png` | macOS のメニューバー。36px (18pt の 2 倍) |
 

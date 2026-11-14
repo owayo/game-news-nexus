@@ -29,7 +29,7 @@ Game News Nexus: ゲームのお知らせを集めて読む Windows と macOS (A
 
 手元で動かして確かめるときは、利用者のデータを汚さないよう `GNN_HOME` に作業用ディレクトリを指定する。
 画面を操作せずに確かめるための開発用の環境変数 (デバッグビルドだけで効く):
-`GNN_DEV_PAGE` (news・releases・sources・settings)、`GNN_DEV_SOURCE` (ソース画面で選ぶ ID)、
+`GNN_DEV_PAGE` (news・agenda・sources・settings)、`GNN_DEV_SOURCE` (ソース画面で選ぶ ID)、
 `GNN_DEV_TEST` (選んだカタログのソースをテスト取得)、`GNN_DEV_TAB=yaml` (編集画面を YAML タブで開く)、
 `GNN_DEV_CROP_IMAGE` (アイコンの切り抜き画面を開く)。
 
@@ -67,6 +67,10 @@ Game News Nexus: ゲームのお知らせを集めて読む Windows と macOS (A
   gpui が読めなかった画像を見つける) を通る。画像の取り直しの頼みのまとめ方と上限は `image_recovery.rs` (通信も
   保存もしない待ち行列)。
   画面の共有状態は `state.rs` の `AppState` (予定の表と、状態が変わる時刻を待つ時計も持つ)。
+  画面は `ui/`: `workspace.rs` (タイトルバー・サイドバー・ステータスバー・画面の切り替え)、`news.rs` (お知らせの
+  一覧)、`agenda.rs` (今日の予定)、`article.rs` (本文。お知らせと今日の予定で共有する `ArticleView`)、
+  `sources.rs`・`source_editor.rs` (ソースと手元の定義の編集)、`settings.rs`、`components/` (共通部品)、
+  `theme.rs` (配色。テーマは `assets/theme.json`)。ウィンドウの幅による並べ方は `ui::Layout`。
   OS に関わる処理は `autostart.rs` (Windows は Run キー、macOS は `~/Library/LaunchAgents` の plist)・
   `shortcut.rs` (Windows の通知のためのスタートメニューのショートカット)・`tray.rs` (トレイ、macOS は
   メニューバー)・`instance.rs` (ロックファイル + localhost の TCP。2 つ目の起動の `show` と `--quit` の `quit`。
@@ -105,7 +109,18 @@ Game News Nexus: ゲームのお知らせを集めて読む Windows と macOS (A
   始めない (誤りとして記録しない)。合図の前に始めた書き込みは最後まで行う。取り消した取得は保存も取得ログの記録も
   せず (前回の取得の時刻のままなので、次の取得で取り直す)、画面に終わりを知らせない。閉じたあとの `with_store` は
   誤りを返す。競合の順番を決めるテストは、テストだけで効く止め場所 (`services.rs` の `Pause`) を使い、時間で待たない。
-- 同じ見た目を複数の画面で作るときは `ui/components.rs` に部品を置いて使う。
+- 同じ見た目を複数の画面で作るときは `ui/components/` に部品を置いて使う (ナビの項目・カード・設定の行・
+  予定のチップとカード・件数・札など)。
+- 色はテーマ (`crates/gnn-app/assets/theme.json`、gpui-kit の ThemeConfig) と `ui::theme::Palette` (カードの面・
+  選んだナビ・予定の色) から取り、画面のコードに 16 進の色を書かない。テーマの色の名前は gpui-kit の
+  `ThemeConfigColors` の serde の名前 (`link`・`drag.border` など) で、知らない名前は黙って読み飛ばされるので、
+  `ui::theme` のテストが照らす。一覧の選択 (`list.active`) と文字の選択 (`selection`) は gpui-kit が透明度を
+  20%・30% までに丸めるので半透明で書く。主色 (ローズ。アイコンの #E64969 から) は操作・選択・未読にだけ使い、
+  メンテ中・失敗などの状態は `Palette::tone` の色とアイコン・文言で示す (色だけで区別しない)。
+- 既読・未読の変更は `AppState::set_read` (ストアに書く) か `AppState::read_changed` (ストアで変えたあと) を通し、
+  `AppEvent::ReadChanged` ですべての画面 (一覧・本文・今日の予定) に知らせる。記事は本文を出せてから既読にする
+  (`ArticleEvent::Opened`)。
+- 一覧を読み直しても見ている行を動かさない (`news.rs` は先頭に見えていた記事で位置を保ち、上に入った記事を数える)。
 - 日時はタイムゾーンを捨てない。タイムゾーンのない日時はソースの `timezone` (既定 Asia/Tokyo) で読み、
   0 時 0 分 0 秒は日付だけの投稿 (`TimePrecision::Date`) とする。
 - 記事の同一性は `(source_id, external_id)`。`external_id` は `id` → `url` → `title` の順に決まる。
@@ -180,6 +195,28 @@ Game News Nexus: ゲームのお知らせを集めて読む Windows と macOS (A
 - 同梱のカタログ (`crates/gnn-core/catalog/`) と game-news-nexus-config は同じ中身にする。定義を変えたら
   両方に入れ、`mise run catalog-check` と `mise run catalog-try` (実サイト) で確かめる。
   公開したソースの `id` は変えない (記事と購読が引き継がれなくなる)。
+- **成人向けのソース (`adult: true`。FANZA GAMES の版など) は、設定で 18 歳以上と同意したときだけ使う**
+  (`AppSettings::adult_consented_at`。`None` なら使わない。画面で入れるたびに確かめ、切ると消す)。
+  - 版ごとに別のソース (別の ID) にする。一般向けの版が今の ID を引き継ぎ、成人向けの版に `general_edition` (一般向けの
+    版の ID) を書く。組はカタログの定義で決め (`Catalog::editions_and_problems`: 同じグループ・同じ `channel` の成人向けで
+    ないソースを 1 対 1 で指す)、合わない組と重なる組の成人向けの版は同意していても使わない (先勝ちにしない)。
+  - `catalog::resolve(.., adult)` が切り替える: 同意していなければ成人向けのソースを入れない。同意していれば、組の
+    成人向けの版が一般向けの版の位置に入り、一般向けの版の購読を使う (`ResolvedSource::subscription_id`。記事・取得・
+    画像は `id()`。on/off やアイコンを変える `AppState::set_enabled` などは購読の ID で書く)。通信の許可
+    (`allow_private_network`) は引き継がない。カタログが成人向けなら手元の上書きでも成人向けのまま、手元だけのソースは
+    `general_edition` を使えない。成人向けだけのゲームは既定のグループでも off で購読に足す (`adopt_new_entries`)。
+  - 使わない成人向けのソース (`catalog::hidden_adult_sources`。`AppState::hides`) は、一覧・予定だけでなく、記事を
+    直接開く操作 (通知・前に開いていた記事。`ArticleView` が閉じる)・通知 (`CycleFinished` で今使っているソースに絞る)・
+    テスト取得 (`Services::test_fetch`)・旧形式の書き出しからも隠す。同意を切ったら取得中のものも取り消す
+    (`Services::source_removed`)。切るときは保存より先に止める (`Services::set_adult_consent`)。
+  - 前の版を使い続けるとき (読めない・より新しいアプリが要る)、新しい版の `Header` が成人向けなら前の版も成人向けに
+    する (`CatalogEntry::forced_adult`。控えの `forced_adult` に残す)。控えは読み方の版 (`CATALOG_READER_VERSION`) が
+    違えば使わない (成人向けの読み方を変えたら上げる)。
+  - 一般向けの版が前に成人向けの版の取得先から取得していた記事は、成人向けの版に `inherit_articles: true` を書くと、
+    組を初めて見たときに 1 度だけ移す (`Store::inherit_articles`。`edition_migrations` に残す。起動時とカタログの
+    取り込みのあと)。勝手に移さない (本当に一般向けの記事まで隠すため)。
+  - `gnn try` は `--adult-consent` がなければ成人向けのソースを試さず、GitHub Actions では成人向けの記事の題名と本文を
+    出さない。初めて取得したソース (保存済みの記事がない) の新着は通知しない。
 - YAML を書き出すときは `gnn_core::yaml::to_string` を使う (文字列を単一引用符で囲み、正規表現を
   そのまま書ける)。`serde-saphyr` の書き出しをそのまま使うと、`\` を含む文字列が二重引用符になる。
 - 設定・購読・手元の定義・カタログの控え・旧形式の `game_info.jsonl` は `config::write_atomic` で書く。書き込みごとに
@@ -241,6 +278,16 @@ Game News Nexus: ゲームのお知らせを集めて読む Windows と macOS (A
   (終わりが未定・記載なしなら `OPEN_FOR` まで)。日付だけの `as_of` からは「メンテ中」にしない。表を引く範囲 (`span`)・
   本文の取り直し (`needs_recheck`)・今日明日の並び・サイドバーの印・旧形式の日付も `as_of` を使う。
 - 延長は `from → end`、日程変更は変更ごとの `from → to` を並べて出す。今日・明日は変更の後の時間帯で決める。
+- 「今日の予定」の画面の並べ方は `Agenda::day_entries` (規則を変えたら agenda.rs のテストを足す): メンテナンスは
+  その日に時間帯が重なるもの (今日は、予定の時間内・実施中の報告・終了未定・終了予定を過ぎた・決められないものを
+  「今確かめたい」(`DayGroup::Now`) に)、期間は数える種類の節目がその日にあるもの。日付だけは `DateOnly`、
+  完了・中止・延期・時刻を過ぎたメンテナンスは `Finished` (件数に数えない)。同じ記事の対象だけが違うメンテナンスは
+  1 件にまとめる。サイドバーの件数は `Agenda::today_count`。
+- お知らせの一覧を予定で絞る条件は `agenda::ScheduleFilter` (`Agenda::filter_entries`。規則を変えたら agenda.rs の
+  テストを足す): 「関係」は `day_entries` に出るもの、「始まる」はメンテナンスの開始 (中止・延期を除く) と期間の始まり、
+  「終わる」はまだ終わっていないもの (メンテナンスは完了・中止・延期の報告がなく `Past` でない。期間は過ぎていない
+  終わりの節目)。期間は `counts_for_agenda` の種類だけ。期間の終わりの時刻も状態が変わる時刻 (`boundaries`) に入れる。
+  一覧は絞った記事の ID で引き (件数の上限なし)、絞っているときは予定のまとまりに分けない。
 - バッジは、同じ記事で同じ時間帯・同じ状態の、対象だけが違うメンテナンスを 1 つにまとめる (3 つ以上は「PC版ほか 2 件」、
   ツールチップに全部の名前)。状態が違うものはまとめない。
 - `AgendaDetail` の 2 つのバリアントは `Box` (clippy の `large_enum_variant` 対策)。組み立ては `AgendaDetail::from(..)`。

@@ -1,4 +1,4 @@
-# Twinkle☆Star Knights
+# Twinkle☆Star Knights (DMM GAMES 版。FANZA GAMES 版は twinkle_star_knights_r18)
 # yaml-language-server: $schema=../../schema/source.schema.json
 schema: 2
 min_app_version: '26.11.6'
@@ -9,7 +9,7 @@ tags:
 lists:
   - kind: html
     request:
-      url: 'https://prod-dmmpcr.twinkle-star-knights.com/proxy/bottom/info/list/allInfo'
+      url: 'https://prod-dmmpcg.twinkle-star-knights.com/proxy/bottom/info/list/allInfo'
     items: '#navi_info_wrap ul.navi_info_inner_list > li'
     fields:
       url:

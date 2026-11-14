@@ -1,4 +1,4 @@
-# モンスター娘TD
+# モンスター娘TD (DMM GAMES 版。FANZA GAMES 版は monster_musume_td_r18)
 # yaml-language-server: $schema=../../schema/source.schema.json
 schema: 2
 min_app_version: '26.11.6'
@@ -9,7 +9,7 @@ tags:
 lists:
   - kind: json
     request:
-      url: 'https://assets.game-monmusu-td.net/res/information/news/1/news.json'
+      url: 'https://assets.game-monmusu-td.net/res/information/news/0/news.json'
     items: '/newsList'
     fields:
       id: '/id'

@@ -74,7 +74,7 @@ cargo install --locked --git https://github.com/owayo/game-news-nexus gnn-cli
 | コマンド | 説明 |
 | --- | --- |
 | `gnn check <カタログ>` | 書式・決まり・CSS セレクタ・JSON Schema の古さを検査する |
-| `gnn try <カタログ> [ID ...]` | 実サイトから取得し、段ごとの件数と記事の先頭を出す |
+| `gnn try <カタログ> [ID ...] [--adult-consent]` | 実サイトから取得し、段ごとの件数と記事の先頭を出す。成人向けのソース (`adult: true`) は `--adult-consent` (18 歳以上で、成人向けの内容を取得することに同意する場合だけ付ける) のときだけ試し、GitHub Actions の中では記事の題名と本文を出さない |
 | `gnn schema [--out <ファイル>]` | 取得の定義の JSON Schema を書き出す |
 | `gnn convert <sources.toml> <出力先>` | 書式 1 (TOML) の定義を YAML に変換する |
 

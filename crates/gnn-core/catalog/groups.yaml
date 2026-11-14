@@ -4,7 +4,7 @@
 groups:
   - id: dmm
     name: DMM GAMES
-    description: 'DMM GAMES / FANZA GAMES のタイトルのお知らせ'
+    description: 'DMM GAMES / FANZA GAMES のタイトルのお知らせ (FANZA GAMES の版は、設定で 18 歳以上と同意したときだけ使う)'
     default: true
   - id: hoyoverse
     name: HoYoverse
