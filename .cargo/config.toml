@@ -1,0 +1,7 @@
+# Windows の実行ファイルは C ランタイム (VCRUNTIME140.dll) を静的にリンクする。既定の MSVC のビルドはこの DLL を使い、
+# Visual C++ の再頒布可能パッケージが入っていない PC では起動できない (利用者ごとのインストーラーは、管理者の権限が要る
+# それを入れられない)。手元のビルド・テスト・CI・リリースがすべて同じ形になるよう、ここを唯一の正にする。
+# 環境変数 RUSTFLAGS・CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS を指定すると、この設定は使われない
+# (mise run installer が、ランタイムの DLL を使う実行ファイルを断る)。
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

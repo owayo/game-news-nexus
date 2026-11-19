@@ -1,0 +1,19 @@
+[package]
+name = "gnn-licenses"
+description = "配布物に入れる Rust のクレートのライセンスの一覧を cargo-about で作る (mise run licenses)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+handlebars.workspace = true
+spdx.workspace = true
+tempfile.workspace = true

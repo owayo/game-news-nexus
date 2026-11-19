@@ -1,0 +1,51 @@
+{{!--
+  配布物に入れる Rust のクレートのライセンスの一覧のひな形 (Handlebars)。mise run licenses (tools/licenses の
+  gnn-licenses) が、cargo-about の JSON (cargo-about がひな形に渡すものと同じ) に standard_texts
+  (allowlist.toml の standard-text) を足して当てはめる。本文は 4 つのバッククォートで囲む (囲みを壊す本文が
+  ないかは gnn-licenses が確かめる)。手元のパス (manifest_path・source_path) は OS ごとに違うので出さない。
+--}}
+# Rust のクレートのライセンス
+
+<!-- このファイルは mise run licenses が packaging/licenses/ の about.toml・about.hbs・allowlist.toml から作ります。手で直さないでください。 -->
+
+Game News Nexus の実行ファイル (Windows 版と macOS 版) に組み込んだ Rust のクレート (間接の依存を含む) と、
+そのライセンスの一覧です。アプリ本体のライセンスは MIT License で、本文はアプリと一緒に入っている `LICENSE` にあります。
+クレートには、それぞれのライセンスが適用されます。
+
+- 複数のライセンスから選べるクレートは、ここに載せたライセンスで利用しています。
+- クレートは改変せずに使っています。各クレートのソースコードは、クレートの名前のリンク (crates.io のその版のページ、
+  または git のリポジトリ) から入手できます。Mozilla Public License 2.0 のクレートも同じです。
+- 辞書のデータ (IPAdic) など、クレートのライセンスでは表せない第三者のものの表示は、同じフォルダの README.md の
+  一覧にあるファイルを見てください。
+
+## ライセンスごとのクレートの数
+
+| ライセンス | SPDX | クレート |
+| --- | --- | ---: |
+{{#each overview}}
+| {{{name}}} | {{{id}}} | {{count}} |
+{{/each}}
+{{#if standard_texts}}
+
+## 標準の文面を載せたクレート
+
+次のクレートは原文を取得できなかったため、ライセンスの標準の文面 (SPDX のもの) を載せています。
+
+{{#each standard_texts}}
+- {{#each crates}}{{#unless @first}}・{{/unless}}{{{this}}}{{/each}} ({{{license}}}): {{{reason}}}
+{{/each}}
+{{/if}}
+{{#each licenses}}
+{{#if first_of_kind}}
+
+## {{{name}}} ({{{id}}})
+{{/if}}
+
+{{#each used_by}}
+- [{{{crate.name}}} {{{crate.version}}}]({{#if (eq crate.source "registry+https://github.com/rust-lang/crates.io-index")}}https://crates.io/crates/{{{crate.name}}}/{{{crate.version}}}{{else}}{{{crate.repository}}}{{/if}})
+{{/each}}
+
+````text
+{{{text}}}
+````
+{{/each}}

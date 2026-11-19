@@ -1,0 +1,5 @@
+crates/gnn-app
+crates/gnn-cli
+crates/gnn-core
+crates/gnn-fetch
+crates/gnn-schedule

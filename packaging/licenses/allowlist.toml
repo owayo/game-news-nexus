@@ -1,0 +1,88 @@
+# gnn-licenses (mise run licenses) が認める例外。cargo-about の設定 (about.toml) では原文を指定できないもの
+# と、一覧に入れないライセンスのファイルを、確かめた理由と一緒に書く。使われなくなった項があると
+# gnn-licenses が止まる (消し忘れを防ぐ)。
+
+# ---- standard-text ----------------------------------------------------------------------------
+# 原文を取得できないので、SPDX のライセンスの標準の文面を載せるクレート (版を問わない)。cargo-about は本文が
+# 見つからないと黙って標準の文面に置き換えるので、ここにないクレートが置き換わると gnn-licenses が止まる。
+# 足す前に、パッケージと公開時のコミットのリポジトリに原文がないことを確かめる (あれば about.toml の clarify)。
+# 一覧の「標準の文面を載せたクレート」の節に、理由と一緒に出る。
+
+[[standard-text]]
+crates = [
+    "block2",
+    "dispatch2",
+    "objc2",
+    "objc2-app-kit",
+    "objc2-cloud-kit",
+    "objc2-core-data",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "objc2-core-image",
+    "objc2-core-services",
+    "objc2-core-text",
+    "objc2-core-video",
+    "objc2-encode",
+    "objc2-foundation",
+    "objc2-metal",
+    "objc2-quartz-core",
+    "objc2-security",
+    "objc2-uniform-type-identifiers",
+    "objc2-user-notifications",
+]
+license = "MIT"
+reason = "上流 (madsmtm/objc2) の LICENSE.md はライセンスの説明だけで本文がない。古い版の LICENSE.txt (Steven Sheldon の著作権表示) は objc-sys の項に載せた"
+
+[[standard-text]]
+crates = ["mac"]
+license = "MIT"
+reason = "上流 (reem/rust-mac) にライセンスのファイルがない"
+
+[[standard-text]]
+crates = ["seahash"]
+license = "MIT"
+reason = "パッケージに本文がなく、リポジトリ (gitlab.redox-os.org) から公開時のファイルを取れない"
+
+[[standard-text]]
+crates = ["zune-core", "zune-inflate", "zune-jpeg"]
+license = "MIT"
+reason = "上流 (etemesi254/zune-image) に MIT の本文のファイルがない (LICENSE.md は表示だけ)"
+
+[[standard-text]]
+crates = ["dwrote", "selectors"]
+license = "MPL-2.0"
+reason = "上流のリポジトリにもライセンスのファイルがない。MPL-2.0 の本文に著作権表示はなく、標準の文面と同じ"
+
+# ---- unlisted-file ----------------------------------------------------------------------------
+# 一覧に入れない、クレートの中のライセンスのファイル (直下の NOTICE と、cargo-about が見ない下の階層の
+# もの。直下の tests・benches・examples は依存先の実行ファイルに入らないので見ない)。実行ファイルに入る
+# コードやデータのものは、ここではなく about.toml の clarify の files に足す。パスはクレートのフォルダから。
+
+[[unlisted-file]]
+crate = "aws-lc-sys"
+paths = ["aws-lc/LICENSE", "aws-lc/third_party/fiat/LICENSE"]
+reason = "直下の LICENSE (一覧に入れる) が、AWS-LC と fiat-crypto の著作権表示と本文をまとめている"
+
+[[unlisted-file]]
+crate = "chrono-tz"
+paths = ["tz/LICENSE"]
+reason = "IANA の tz データベースはパブリックドメイン。BSD のコード (date.c など) はパッケージに入っていない"
+
+[[unlisted-file]]
+crate = "hasami"
+paths = ["eval/mecab-ipadic-2.7.0-20070801/COPYING"]
+reason = "評価用のデータで、ライブラリに入らない (IPAdic の表示は、一覧の hasami の NOTICE と LICENSE-IPADIC にある)"
+
+[[unlisted-file]]
+crate = "markup5ever_rcdom"
+paths = [
+    "html5lib-tests/LICENSE",
+    "html5lib-tests/lint_lib/_vendor/funcparserlib/LICENSE",
+    "xml5lib-tests/LICENSE",
+]
+reason = "テストのデータで、ライブラリに入らない"
+
+[[unlisted-file]]
+crate = "rustybuzz"
+paths = ["scripts/ms-use/COPYING"]
+reason = "表を作るスクリプトのデータで、ライブラリに入らない"
