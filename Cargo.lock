@@ -2639,7 +2639,7 @@ dependencies = [
 
 [[package]]
 name = "gnn-app"
-version = "26.11.6"
+version = "26.11.100"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2677,7 +2677,7 @@ dependencies = [
 
 [[package]]
 name = "gnn-cli"
-version = "26.11.6"
+version = "26.11.100"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2694,7 +2694,7 @@ dependencies = [
 
 [[package]]
 name = "gnn-core"
-version = "26.11.6"
+version = "26.11.100"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2720,7 +2720,7 @@ dependencies = [
 
 [[package]]
 name = "gnn-dict"
-version = "26.11.6"
+version = "26.11.100"
 dependencies = [
  "anyhow",
  "hasami",
@@ -2730,7 +2730,7 @@ dependencies = [
 
 [[package]]
 name = "gnn-fetch"
-version = "26.11.6"
+version = "26.11.100"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2765,7 +2765,7 @@ dependencies = [
 
 [[package]]
 name = "gnn-icons"
-version = "26.11.6"
+version = "26.11.100"
 dependencies = [
  "anyhow",
  "icns",
@@ -2775,7 +2775,7 @@ dependencies = [
 
 [[package]]
 name = "gnn-licenses"
-version = "26.11.6"
+version = "26.11.100"
 dependencies = [
  "anyhow",
  "handlebars",
@@ -2788,7 +2788,7 @@ dependencies = [
 
 [[package]]
 name = "gnn-schedule"
-version = "26.11.6"
+version = "26.11.100"
 dependencies = [
  "chrono",
  "chrono-tz",
