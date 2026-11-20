@@ -7,11 +7,13 @@ use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::StyledExt as _;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, Hsla, ImageSource, IntoElement, ObjectFit, ParentElement, Pixels, RenderImage, RenderOnce,
+    App, Hsla, IntoElement, ObjectFit, ParentElement, Pixels, RenderImage, RenderOnce,
     SharedString, Styled, StyledImage as _, Window, div, img, px, rgb,
 };
 use image::RgbaImage;
 use parking_lot::Mutex;
+
+mod thumbnail;
 
 /// ソースのアイコン。角丸の正方形で、画像がなければ名前の頭文字を出す。
 /// サイドバー・記事の一覧・本文・ソース画面で同じものを使う。
@@ -29,23 +31,23 @@ impl SourceAvatar {
             icon: icon
                 .map(Into::into)
                 .filter(|icon: &SharedString| !icon.trim().is_empty()),
-            size: px(28.),
+            size: px(32.),
         }
     }
 
-    /// 記事の一覧の行の見出しに置く大きさ (16px)。
+    /// お知らせと予定の行でゲーム名に添える大きさ。
     pub fn xsmall(mut self) -> Self {
-        self.size = px(16.);
-        self
-    }
-
-    /// サイドバーと本文の見出しに置く大きさ (20px)。
-    pub fn small(mut self) -> Self {
         self.size = px(20.);
         self
     }
 
-    /// ソース画面の見出しに置く大きさ (40px)。
+    /// ゲーム選択メニューと本文の見出しに置く大きさ。
+    pub fn small(mut self) -> Self {
+        self.size = px(24.);
+        self
+    }
+
+    /// ピックアップやソース画面でゲームのアイコンを大きく見せるときに使う。
     pub fn large(mut self) -> Self {
         self.size = px(40.);
         self
@@ -55,30 +57,37 @@ impl SourceAvatar {
 impl RenderOnce for SourceAvatar {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let radius = (self.size * 0.24).max(px(4.));
-        let tile = div()
-            .size(self.size)
-            .flex_shrink_0()
-            .rounded(radius)
-            .overflow_hidden();
-        match self.icon {
-            // gpui は親の角丸で子を切り抜かないので、画像そのものを角丸で描く。
-            Some(icon) => tile.bg(cx.theme().muted).child(
-                img(icon_source(icon.trim()))
-                    .size_full()
-                    .rounded(radius)
-                    .object_fit(ObjectFit::Cover),
-            ),
-            None => tile
+        let size = self.size;
+        let tile = move || {
+            div()
+                .size(size)
+                .flex_shrink_0()
+                .rounded(radius)
+                .overflow_hidden()
+        };
+        let initials = move || {
+            tile()
                 .bg(name_color(&self.name))
                 .flex()
                 .items_center()
                 .justify_center()
                 .text_color(gpui_kit::white())
-                .text_size(self.size * 0.5)
-                .line_height(self.size)
+                .text_size(size * 0.5)
+                .line_height(size)
                 .font_semibold()
-                .when(self.size >= px(20.), |this| this.font_bold())
-                .child(initial(&self.name)),
+                .when(size >= px(20.), |this| this.font_bold())
+                .child(initial(&self.name))
+        };
+        match self.icon {
+            // gpui は親の角丸で子を切り抜かないので、画像そのものを角丸で描く。
+            Some(icon) => tile().bg(cx.theme().muted).child(
+                img(thumbnail::source(icon.trim(), size))
+                    .size_full()
+                    .rounded(radius)
+                    .with_fallback(move || initials().into_any_element())
+                    .object_fit(ObjectFit::Cover),
+            ),
+            None => initials(),
         }
     }
 }
@@ -104,16 +113,6 @@ fn name_color(name: &str) -> Hsla {
         hash.wrapping_mul(31).wrapping_add(byte.into())
     });
     rgb(AVATAR_COLORS[hash as usize % AVATAR_COLORS.len()]).into()
-}
-
-/// アイコンの指定を画像の読み込み元にする。URL はそのまま、それ以外は手元のファイル。
-fn icon_source(icon: &str) -> ImageSource {
-    if icon.starts_with("http://") || icon.starts_with("https://") {
-        ImageSource::from(crate::http_client::display_uri(icon).into_owned())
-    } else {
-        let path = icon.strip_prefix("file:///").unwrap_or(icon);
-        ImageSource::from(std::path::PathBuf::from(path))
-    }
 }
 
 /// アプリのロゴ (アプリのアイコンと同じ絵)。タイトルバー・本文の欄の案内・設定に置く。
@@ -145,7 +144,7 @@ fn logo_for(side: u32) -> Arc<RenderImage> {
         .lock()
         .entry(side)
         .or_insert_with(|| {
-            let mut pixels = gnn_icons::resize_icon(&LOGO, side);
+            let mut pixels = gnn_icons::resize_icon(&*LOGO, side);
             // gpui の RenderImage は BGRA。
             for pixel in pixels.pixels_mut() {
                 pixel.0.swap(0, 2);

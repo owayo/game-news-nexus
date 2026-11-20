@@ -34,11 +34,11 @@ use gpui_kit::{
 use crate::format;
 use crate::state::AppState;
 use crate::ui::Layout;
+use crate::ui::components::icon_buttons;
 use crate::ui::components::{
     Badge, BadgeTone, Card, CodeBlock, CountPill, EmptyState, PageHeader, RunResult, SourceAvatar,
     StatItem, StatusIcon, open_web_url, segmented,
 };
-use crate::ui::icon_cropper::pick_and_crop;
 use crate::ui::source_editor::{EditorEvent, EditorMode, SourceEditor};
 use crate::ui::theme::Palette;
 
@@ -391,27 +391,6 @@ impl SourcesPage {
         cx.notify();
     }
 
-    fn pick_icon(&mut self, id: String, name: String, window: &mut Window, cx: &mut Context<Self>) {
-        let icons_dir = self.app.read(cx).services().paths().icons_dir();
-        let app = self.app.clone();
-        pick_and_crop(
-            id.clone(),
-            name,
-            icons_dir,
-            window,
-            cx,
-            move |path, window, cx| {
-                let icon = path.display().to_string();
-                let result = app.update(cx, |app, cx| app.set_icon(&id, Some(icon), cx));
-                let note = match result {
-                    Ok(()) => Notification::success("アイコンを設定しました"),
-                    Err(err) => Notification::error(format!("アイコンを保存できません: {err:#}")),
-                };
-                window.push_notification(note, cx);
-            },
-        );
-    }
-
     /// 検索に合うか。
     fn matches(&self, texts: &[&str]) -> bool {
         self.query.is_empty()
@@ -513,7 +492,7 @@ impl SourcesPage {
             selected,
             cx,
         )
-        .child(SourceAvatar::new(config.name.clone(), config.icon.clone()))
+        .child(SourceAvatar::new(config.name.clone(), config.icon.clone()).large())
         .child(
             v_flex()
                 .flex_1()
@@ -589,7 +568,7 @@ impl SourcesPage {
             selected,
             cx,
         )
-        .child(SourceAvatar::new(entry.name.clone(), None::<String>))
+        .child(SourceAvatar::new(entry.name.clone(), None::<String>).large())
         .child(
             div()
                 .flex_1()
@@ -998,17 +977,12 @@ impl SourcesPage {
         let config = &source.config;
         let state = app.state_of(&config.id).cloned();
         let running = app.is_running(&config.id);
-        let local_icon = app
-            .subscriptions()
-            .get(&config.id)
-            .and_then(|item| item.icon.clone());
         let failed = source.enabled
             && state
                 .as_ref()
                 .and_then(|state| state.last_status)
                 .is_some_and(|status| status == RunStatus::Failed);
         let id = config.id.clone();
-        let name = config.name.clone();
         let homepage = config.homepage.clone();
         let repository_url = format!("{CATALOG_REPOSITORY}/blob/main/{}", entry.path);
 
@@ -1037,8 +1011,18 @@ impl SourcesPage {
                                 .flex_1()
                                 .min_w_0()
                                 .gap_1()
-                                .child(div().text_sm().font_semibold().child("前回の取得に失敗しました"))
-                                .child(div().text_sm().text_color(theme.muted_foreground).child(message)),
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_semibold()
+                                        .child("前回の取得に失敗しました"),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .child(message),
+                                ),
                         )
                         .child(
                             Button::new("catalog-retry")
@@ -1098,37 +1082,23 @@ impl SourcesPage {
             .child(
                 Card::new()
                     .title("このアプリでのアイコン")
-                    .description("画像を選ぶと正方形に切り抜く画面が開きます。切り抜いた画像は、このパソコンだけに保存します。")
+                    .description(
+                        "配信元のアイコンを再取得したり、自分で切り抜いた画像を使ったりできます。",
+                    )
                     .child(
                         h_flex()
                             .gap_3()
-                            .child(SourceAvatar::new(config.name.clone(), config.icon.clone()).large())
-                            .child({
-                                let id = id.clone();
-                                let name = name.clone();
-                                Button::new("catalog-pick-icon")
-                                    .small()
-                                    .outline()
-                                    .icon(IconName::ImagePlus)
-                                    .label("画像から作る")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.pick_icon(id.clone(), name.clone(), window, cx)
-                                    }))
-                            })
-                            .when(local_icon.is_some(), |this| {
-                                let id = id.clone();
-                                this.child(
-                                    Button::new("catalog-clear-icon")
-                                        .small()
-                                        .ghost()
-                                        .label("外す")
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            if let Err(err) = this.app.update(cx, |app, cx| app.set_icon(&id, None, cx)) {
-                                                tracing::error!("アイコンを外せません: {err:#}");
-                                            }
-                                        })),
-                                )
-                            }),
+                            .flex_wrap()
+                            .child(
+                                SourceAvatar::new(config.name.clone(), config.icon.clone()).large(),
+                            )
+                            .child(icon_buttons(
+                                &self.app,
+                                Some(&config.id),
+                                &config.name,
+                                config.icon.as_deref(),
+                                cx,
+                            )),
                     ),
             )
             .when_some(config.note.clone(), |this, note| {

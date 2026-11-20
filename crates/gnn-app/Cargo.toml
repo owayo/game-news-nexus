@@ -45,7 +45,7 @@ getrandom.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-registry.workspace = true
-windows.workspace = true
+windows = { workspace = true, features = ["Win32_Graphics_Imaging", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 pretty_assertions.workspace = true

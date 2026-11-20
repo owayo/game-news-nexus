@@ -25,17 +25,17 @@ use gpui_kit::component::{
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
+    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window,
     div, px, relative,
 };
 use serde_json::Value;
 
 use crate::state::AppState;
+use crate::ui::components::icon_buttons;
 use crate::ui::components::{
     Badge, BadgeTone, Card, FormRow, RunResult, SourceAvatar, StatusIcon, segmented,
 };
-use crate::ui::icon_cropper::pick_and_crop;
 use crate::ui::theme::Palette;
 
 /// 編集画面から一覧への知らせ。
@@ -429,7 +429,7 @@ const DISPLAY: &[FieldDef] = &[
     field(
         "icon",
         "アイコンの URL",
-        "配信元の画像の URL。手元の画像は下の「画像から作る」で設定する。",
+        "この定義で使う画像の URL。自分のパソコンでだけ使う画像は下で設定する。",
         FieldKind::Text,
     ),
     field("homepage", "公式サイト", "", FieldKind::Text),
@@ -1115,84 +1115,27 @@ impl SourceEditor {
         }
     }
 
-    /// 画像を選んで切り抜き、このアプリでのアイコンにする (すぐ保存する)。
-    fn pick_icon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.original.as_ref().map(|(source, _)| source.id.clone()) else {
-            return;
-        };
-        let name = get(&self.draft, "name")
-            .and_then(Value::as_str)
-            .unwrap_or(&id)
-            .to_string();
-        let icons_dir = self.app.read(cx).services().paths().icons_dir();
-        let app = self.app.clone();
-        pick_and_crop(
-            id.clone(),
-            name,
-            icons_dir,
-            window,
-            cx,
-            move |path, window, cx| {
-                let icon = path.display().to_string();
-                let result = app.update(cx, |app, cx| app.set_icon(&id, Some(icon), cx));
-                if let Err(err) = result {
-                    window.push_notification(
-                        Notification::error(format!("アイコンを保存できません: {err:#}")),
-                        cx,
-                    );
-                }
-            },
-        );
+    /// プレビューには購読に保存したアイコンを優先し、なければ編集中の定義を使う。
+    fn icon(&self, cx: &App) -> Option<String> {
+        self.original
+            .as_ref()
+            .and_then(|(source, _)| self.app.read(cx).local_icon(&source.id))
+            .or_else(|| get(&self.draft, "icon").and_then(Value::as_str))
+            .map(str::to_owned)
     }
 
-    fn clear_icon(&mut self, cx: &mut Context<Self>) {
-        if let Some((source, _)) = &self.original {
-            let id = source.id.clone();
-            if let Err(err) = self.app.update(cx, |app, cx| app.set_icon(&id, None, cx)) {
-                tracing::error!("アイコンを外せません: {err:#}");
-            }
-        }
-    }
-
-    /// このアプリでのアイコン (購読に保存する手元の画像)。
     fn render_local_icon(&self, cx: &mut Context<Self>) -> AnyElement {
-        let saved = self.original.is_some();
-        let id = self.source_id().unwrap_or_default();
-        let app = self.app.read(cx);
-        let local_icon = app
-            .subscriptions()
-            .get(&id)
-            .and_then(|item| item.icon.clone());
+        let id = self.original.as_ref().map(|(source, _)| source.id.as_str());
+        let saved = id.is_some();
         let name = get(&self.draft, "name")
             .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let icon = local_icon.clone().or_else(|| {
-            get(&self.draft, "icon")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        });
+            .unwrap_or("");
+        let icon = self.icon(cx);
         let control = h_flex()
             .gap_2()
-            .child(SourceAvatar::new(name, icon))
-            .child(
-                Button::new("editor-pick-icon")
-                    .small()
-                    .outline()
-                    .icon(IconName::ImagePlus)
-                    .label("画像から作る")
-                    .disabled(!saved)
-                    .on_click(cx.listener(|this, _, window, cx| this.pick_icon(window, cx))),
-            )
-            .when(local_icon.is_some(), |this| {
-                this.child(
-                    Button::new("editor-clear-icon")
-                        .small()
-                        .ghost()
-                        .label("外す")
-                        .on_click(cx.listener(|this, _, _, cx| this.clear_icon(cx))),
-                )
-            });
+            .flex_wrap()
+            .child(SourceAvatar::new(name.to_owned(), icon.clone()))
+            .child(icon_buttons(&self.app, id, name, icon.as_deref(), cx));
         FormRow::new("このアプリでのアイコン", control)
             .help(if saved {
                 "切り抜いた画像は、このパソコンだけに保存します。"
@@ -1450,15 +1393,7 @@ impl Render for SourceEditor {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let local_icon = app
-            .subscriptions()
-            .get(&self.source_id().unwrap_or_default())
-            .and_then(|item| item.icon.clone());
-        let icon = local_icon.or_else(|| {
-            get(&self.draft, "icon")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        });
+        let icon = self.icon(cx);
         let kind_label = parse_draft(&self.draft)
             .ok()
             .map(|config| config.kind_label());

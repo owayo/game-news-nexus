@@ -1,25 +1,16 @@
 //! 配布アイコンと画面内のロゴで使う拡大・縮小。
 
 use image::imageops::{FilterType, resize};
-use image::{Rgba, Rgba32FImage, RgbaImage};
+use image::{GenericImageView, Rgba, RgbaImage};
+use std::sync::LazyLock;
 
 /// 原画の色と透明度をリニア RGB の乗算済みアルファで補間し、sRGB の画像に戻す。
-pub fn resize_icon(image: &RgbaImage, side: u32) -> RgbaImage {
+pub fn resize_icon(image: &impl GenericImageView<Pixel = Rgba<u8>>, side: u32) -> RgbaImage {
     if image.dimensions() == (side, side) {
-        return image.clone();
+        return RgbaImage::from_fn(side, side, |x, y| image.get_pixel(x, y));
     }
 
-    let linear = Rgba32FImage::from_fn(image.width(), image.height(), |x, y| {
-        let [red, green, blue, alpha] = image.get_pixel(x, y).0;
-        let alpha = f32::from(alpha) / 255.0;
-        Rgba([
-            srgb_to_linear(red) * alpha,
-            srgb_to_linear(green) * alpha,
-            srgb_to_linear(blue) * alpha,
-            alpha,
-        ])
-    });
-    let resized = resize(&linear, side, side, FilterType::Lanczos3);
+    let resized = resize(&LinearPixels(image), side, side, FilterType::Lanczos3);
     RgbaImage::from_fn(side, side, |x, y| {
         let [red, green, blue, alpha] = resized.get_pixel(x, y).0;
         let opacity = (alpha * 255.0).round() as u8;
@@ -33,6 +24,30 @@ pub fn resize_icon(image: &RgbaImage, side: u32) -> RgbaImage {
             opacity,
         ])
     })
+}
+
+/// 縮小に使う画素だけを変換し、大きな原画と同じ寸法の浮動小数点バッファを作らない。
+struct LinearPixels<'a, I>(&'a I);
+
+impl<I: GenericImageView<Pixel = Rgba<u8>>> GenericImageView for LinearPixels<'_, I> {
+    type Pixel = Rgba<f32>;
+
+    fn dimensions(&self) -> (u32, u32) {
+        self.0.dimensions()
+    }
+
+    fn get_pixel(&self, x: u32, y: u32) -> Self::Pixel {
+        static LINEAR: LazyLock<[f32; 256]> =
+            LazyLock::new(|| std::array::from_fn(|value| srgb_to_linear(value as u8)));
+        let [r, g, b, a] = self.0.get_pixel(x, y).0;
+        let a = f32::from(a) / 255.0;
+        Rgba([
+            LINEAR[r as usize] * a,
+            LINEAR[g as usize] * a,
+            LINEAR[b as usize] * a,
+            a,
+        ])
+    }
 }
 
 fn srgb_to_linear(value: u8) -> f32 {

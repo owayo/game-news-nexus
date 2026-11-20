@@ -64,6 +64,7 @@ schema: 2
 min_app_version: '26.11.6'
 id: mist_train_girls
 name: ミストトレインガールズ
+icon: 'https://media.games.dmm.com/freegame/app/659943/200.gif'
 lists:
   - kind: json
     request:
@@ -86,6 +87,7 @@ body:
 
 書き方の詳細 (取得方式・取り出す項目・条件・ページ送り・差し込み・本文の整形) は、カタログの [CONTRIBUTING.md](https://github.com/owayo/game-news-nexus-config/blob/main/CONTRIBUTING.md) にまとめています。手元の定義もカタログと同じ書き方です。
 
+- 配信用カタログでは、各 YAML の `icon` にログインせずに取得できる画像の HTTP または HTTPS URL を指定します。公式サイトの favicon やゲームのアイコン画像が使えます。手元だけの定義では省略できます。
 - YAML は 1.2 の決まりで厳格に読みます。文字列は単一引用符で囲んでください (`#` で始まるセレクタや `{{` で始まるテンプレートを YAML の記号と取り違えないため)。アンカー・エイリアス・マージ・独自タグは使えません。
 - アプリのソース画面では、フォームか YAML タブで書けます。YAML タブで書いたコメントは、フォームで値を変えない限りそのまま保存します。
 - 記事は `id` → `url` → `title` の順で見分けます。訂正で新着扱いにならないよう、できるだけ `id` を指定してください。

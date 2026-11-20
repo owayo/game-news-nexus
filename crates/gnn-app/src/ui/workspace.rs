@@ -328,7 +328,7 @@ impl Workspace {
                     ElementId::Name(format!("nav-game-{id}").into()),
                     name.clone(),
                 )
-                .leading(SourceAvatar::new(name, icon).small())
+                .leading(SourceAvatar::new(name, icon))
                 .when_some(mark, |this, mark| {
                     this.trailing(MaintenanceMark::new(mark_id, mark))
                 })

@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use image::imageops::FilterType;
 
+#[cfg(windows)]
+mod exe;
+
 /// 保存するアイコンの一辺 (px)。
 pub const ICON_SIZE: u32 = 256;
 
@@ -53,29 +56,31 @@ impl Selection {
     }
 }
 
-/// 画像の大きさを読む。読めない形式ならエラー。
-pub fn probe(path: &Path) -> Result<(u32, u32)> {
-    let (width, height) = image::image_dimensions(path).with_context(|| {
+/// ファイル選択で指定された画像、または Windows の実行ファイルのアイコンを読む。
+pub fn load_file(path: &Path) -> Result<image::DynamicImage> {
+    #[cfg(windows)]
+    if path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+    {
+        return exe::extract(path)
+            .with_context(|| format!("{} のアイコンを読み込めません", path.display()));
+    }
+    image::open(path).with_context(|| {
         format!(
             "{} を画像として読めません (PNG・JPEG・GIF・WebP・BMP・ICO に対応)",
             path.display()
         )
-    })?;
-    if width == 0 || height == 0 {
-        anyhow::bail!("画像が空です");
-    }
-    Ok((width, height))
+    })
 }
 
 /// 元の画像から正方形を切り抜き、アイコンとして保存する。保存先のパスを返す。
 pub fn save_cropped(
-    source: &Path,
+    image: &image::DynamicImage,
     (x, y, size): (u32, u32, u32),
     icons_dir: &Path,
     source_id: &str,
 ) -> Result<PathBuf> {
-    let image =
-        image::open(source).with_context(|| format!("{} を読めません", source.display()))?;
     let icon =
         image
             .crop_imm(x, y, size, size)
@@ -209,7 +214,7 @@ mod tests {
             };
         }
         banner.save(&source).unwrap();
-        assert_eq!(probe(&source).unwrap(), (300, 120));
+        let source = load_file(&source).unwrap();
 
         let icons = dir.path().join("icons");
         let saved = save_cropped(&source, (180, 0, 120), &icons, "game").unwrap();
@@ -230,6 +235,6 @@ mod tests {
         assert!(saved.exists());
         assert!(!other.exists());
 
-        assert!(probe(&dir.path().join("missing.png")).is_err());
+        assert!(load_file(&dir.path().join("missing.png")).is_err());
     }
 }

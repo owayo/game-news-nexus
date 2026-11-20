@@ -4,6 +4,7 @@
 //! 間隔は 4・8・12・16・24・32px、角丸はカード 12px・行と札 6〜8px を基本にする。
 
 mod avatar;
+mod icon_picker;
 mod layout;
 mod marks;
 mod nav;
@@ -11,6 +12,7 @@ mod run_result;
 mod schedule;
 
 pub use avatar::{AppLogo, SourceAvatar};
+pub use icon_picker::icon_buttons;
 pub use layout::{
     Card, CodeBlock, EmptyState, FormRow, PageHeader, SettingRow, StatItem, segmented,
 };

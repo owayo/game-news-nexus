@@ -593,6 +593,32 @@ impl Services {
             .clone()
     }
 
+    /// アイコンを配信元に問い合わせ、同じ URL で画像が差し替わっていれば画面にも反映する。
+    pub fn refresh_icon(&self, url: String) -> oneshot::Receiver<Result<Refreshed>> {
+        let (sender, receiver) = oneshot::channel();
+        let services = self.clone();
+        self.spawn(async move {
+            let url = ImageCache::normalize(&url);
+            let fetch = async {
+                if ImageCache::is_internal(&url) {
+                    bail!("配信元のアイコン画像の URL を指定してください");
+                }
+                Ok(download_image(&services.http_client(), services.images(), &url, &url).await?)
+            };
+            if let Some(result) = services.unless_stopped(fetch).await {
+                if result.is_ok() {
+                    // 手動で確かめたときは、ディスクと画面に残っている画像が違っていても読み直す。
+                    let _ = services.0.events.send(ServiceEvent::ImagesCached {
+                        available: Vec::new(),
+                        changed: vec![url],
+                    });
+                }
+                let _ = sender.send(result);
+            }
+        });
+        receiver
+    }
+
     pub fn events(&self) -> flume::Sender<ServiceEvent> {
         self.0.events.clone()
     }
@@ -3119,7 +3145,7 @@ mod tests {
                 ("groups.yaml", "groups:\n  - id: games\n    name: Games\n    default: true\n"),
                 (
                     "sources/games/sample_game.yaml",
-                    "schema: 2\nmin_app_version: '26.11.6'\nid: sample_game\nname: Sample Game\nlists:\n  - kind: feed\n    request:\n      url: 'https://example.com/feed.xml'\n",
+                    "schema: 2\nmin_app_version: '26.11.6'\nid: sample_game\nname: Sample Game\nicon: 'https://example.com/icon.png'\nlists:\n  - kind: feed\n    request:\n      url: 'https://example.com/feed.xml'\n",
                 ),
             ]
             .map(|(path, text)| (path.to_owned(), text.to_owned()))

@@ -75,8 +75,9 @@ pub struct SourceConfig {
     /// 公式サイトなど、ソースの案内先。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub homepage: Option<String>,
-    /// アイコン画像の URL。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// ゲームのアイコン画像の公開 HTTP(S) URL。配信用カタログでは必須。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(required, url, length(min = 1))]
     pub icon: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,

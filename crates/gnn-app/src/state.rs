@@ -219,8 +219,11 @@ impl AppState {
         &self.catalog_status
     }
 
-    pub fn subscriptions(&self) -> &Subscriptions {
-        &self.subscriptions
+    pub fn local_icon(&self, id: &str) -> Option<&str> {
+        let key = self
+            .resolved(id)
+            .map_or(id, |source| &source.subscription_id);
+        self.subscriptions.get(key)?.icon.as_deref()
     }
 
     /// 手元の定義のファイル。読めないものも含む。

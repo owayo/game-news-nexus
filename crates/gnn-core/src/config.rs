@@ -382,7 +382,7 @@ impl CatalogCache {
             .files
             .iter()
             .map(|file| (file.path.as_str(), file.text.as_str()));
-        let mut catalog = Catalog::from_files(files, None);
+        let mut catalog = Catalog::from_cached_files(files);
         catalog.force_adult(&self.forced_adult);
         catalog
     }
@@ -964,7 +964,7 @@ mod tests {
                 ),
                 (
                     "sources/games/sample_game.yaml",
-                    "schema: 2\nmin_app_version: '26.11.6'\nid: sample_game\nname: Sample Game\nlists:\n  - kind: feed\n    request:\n      url: 'https://example.com/feed.xml'\n",
+                    "schema: 2\nmin_app_version: '26.11.6'\nid: sample_game\nname: Sample Game\nicon: 'https://example.com/icon.png'\nlists:\n  - kind: feed\n    request:\n      url: 'https://example.com/feed.xml'\n",
                 ),
             ],
             None,
@@ -1425,7 +1425,7 @@ kind = "feed"
         let catalog = Catalog::from_files_for(
             [(
                 "sources/feeds/paced.yaml",
-                "schema: 2\nmin_app_version: '26.11.6'\nid: paced\nname: 間隔あり\ninterval_minutes: 360\nmax_age_days: 30\nlists:\n  - kind: feed\n    request:\n      url: 'https://example.com/feed.xml'\n",
+                "schema: 2\nmin_app_version: '26.11.6'\nid: paced\nname: 間隔あり\nicon: 'https://example.com/icon.png'\ninterval_minutes: 360\nmax_age_days: 30\nlists:\n  - kind: feed\n    request:\n      url: 'https://example.com/feed.xml'\n",
             )],
             None,
             "26.11.6",

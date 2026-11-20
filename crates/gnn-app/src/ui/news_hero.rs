@@ -342,7 +342,10 @@ impl NewsHero {
                     .child(
                         h_flex()
                             .gap_2()
-                            .child(SourceAvatar::new(name.to_owned(), icon).small())
+                            .child(
+                                SourceAvatar::new(name.to_owned(), icon)
+                                    .when(!compact, |avatar| avatar.large()),
+                            )
                             .child(div().min_w_0().truncate().text_xs().child(name.to_owned())),
                     )
                     .child(

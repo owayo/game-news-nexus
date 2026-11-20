@@ -36,70 +36,110 @@ const THUMBNAIL_MAX: u32 = 720;
 
 type OnDone = Box<dyn FnOnce(PathBuf, &mut Window, &mut App)>;
 
-/// 画像を選んで切り抜きのダイアログを開く。切り抜いて保存できたら `on_done` に保存先を渡す。
-pub fn pick_and_crop(
+pub(crate) struct CropTarget {
     source_id: String,
     source_name: String,
     icons_dir: PathBuf,
-    window: &mut Window,
-    cx: &mut App,
-    on_done: impl FnOnce(PathBuf, &mut Window, &mut App) + 'static,
-) {
-    let receiver = cx.prompt_for_paths(PathPromptOptions {
-        files: true,
-        directories: false,
-        multiple: false,
-        prompt: Some("アイコンにする画像を選ぶ".into()),
-    });
-    window
-        .spawn(cx, async move |cx| {
-            let Ok(Ok(Some(paths))) = receiver.await else {
-                return;
-            };
-            let Some(path) = paths.into_iter().next() else {
-                return;
-            };
-            let _ = cx.update(|window, cx| {
-                open_cropper(path, source_id, source_name, icons_dir, window, cx, on_done)
-            });
-        })
-        .detach();
+    on_done: OnDone,
 }
 
-/// 画像の切り抜きのダイアログを開く。画像を読めなければ通知で知らせる。
-pub fn open_cropper(
-    image: PathBuf,
-    source_id: String,
-    source_name: String,
-    icons_dir: PathBuf,
-    window: &mut Window,
-    cx: &mut App,
-    on_done: impl FnOnce(PathBuf, &mut Window, &mut App) + 'static,
-) {
-    window
-        .spawn(cx, async move |cx| {
-            let probe_path = image.clone();
-            let size = cx
-                .background_executor()
-                .spawn(async move { icons::probe(&probe_path) })
-                .await;
-            let _ = cx.update(|window, cx| match size {
-                Err(err) => window.push_notification(Notification::error(format!("{err:#}")), cx),
-                Ok(size) => {
-                    let cropper = cx.new(|_| {
-                        IconCropper::new(image, size, source_id, icons_dir, Box::new(on_done))
-                    });
-                    cropper.update(cx, |cropper, cx| cropper.load_thumbnail(window, cx));
-                    window.open_dialog(cx, move |dialog, _, _| {
-                        dialog
-                            .title(format!("「{source_name}」のアイコン"))
-                            .w(px(VIEW_MAX + PREVIEW + 120.))
-                            .child(cropper.clone())
-                    });
+pub(super) const FILE_LABEL: &str = if cfg!(windows) {
+    "画像・exe から"
+} else {
+    "画像から"
+};
+
+impl CropTarget {
+    pub(crate) fn new(
+        source_id: String,
+        source_name: String,
+        icons_dir: PathBuf,
+        on_done: impl FnOnce(PathBuf, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        Self {
+            source_id,
+            source_name,
+            icons_dir,
+            on_done: Box::new(on_done),
+        }
+    }
+
+    pub(super) fn pick_file(self, window: &mut Window, cx: &mut App) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(
+                if cfg!(windows) {
+                    "画像または exe ファイルを選ぶ"
+                } else {
+                    "画像を選ぶ"
                 }
-            });
+                .into(),
+            ),
+        });
+        window
+            .spawn(cx, async move |cx| {
+                if let Ok(Ok(Some(paths))) = receiver.await
+                    && let Some(path) = paths.into_iter().next()
+                {
+                    let _ = cx.update(|window, cx| self.open_file(path, window, cx));
+                }
+            })
+            .detach();
+    }
+
+    pub(crate) fn open_file(self, path: PathBuf, window: &mut Window, cx: &mut App) {
+        window
+            .spawn(cx, async move |cx| {
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { CropImage::new(icons::load_file(&path)?) })
+                    .await;
+                let _ = cx.update(|window, cx| match result {
+                    Ok(image) => self.open(image, window, cx),
+                    Err(err) => {
+                        window.push_notification(Notification::error(format!("{err:#}")), cx)
+                    }
+                });
+            })
+            .detach();
+    }
+
+    pub(super) fn open(self, image: CropImage, window: &mut Window, cx: &mut App) {
+        let title = format!("「{}」のアイコン", self.source_name);
+        let cropper = cx
+            .new(|_| IconCropper::new(image, self.source_id, self.icons_dir, self.on_done, window));
+        window.open_dialog(cx, move |dialog, _, _| {
+            dialog
+                .title(title.clone())
+                .w(px(VIEW_MAX + PREVIEW + 120.))
+                .child(cropper.clone())
+        });
+    }
+}
+
+/// 選択枠とプレビューは同じ BGRA の縮小画像を使い、保存時だけ元の解像度で切り抜く。
+pub(super) struct CropImage {
+    original: Arc<image::DynamicImage>,
+    thumbnail: image::RgbaImage,
+    display: Arc<RenderImage>,
+}
+
+impl CropImage {
+    pub(super) fn new(image: image::DynamicImage) -> anyhow::Result<Self> {
+        anyhow::ensure!(image.width() > 0 && image.height() > 0, "画像が空です");
+        let mut thumbnail = image.thumbnail(THUMBNAIL_MAX, THUMBNAIL_MAX).to_rgba8();
+        for pixel in thumbnail.pixels_mut() {
+            pixel.0.swap(0, 2);
+        }
+        let display = Arc::new(RenderImage::new(vec![image::Frame::new(thumbnail.clone())]));
+        Ok(Self {
+            original: Arc::new(image),
+            thumbnail,
+            display,
         })
-        .detach();
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,8 +158,7 @@ impl Render for DragGhost {
 }
 
 pub struct IconCropper {
-    image: PathBuf,
-    image_size: (u32, u32),
+    image: CropImage,
     /// 画像を見せている大きさ。
     view: (f32, f32),
     selection: Selection,
@@ -130,8 +169,6 @@ pub struct IconCropper {
     saving: bool,
     error: Option<String>,
     on_done: Option<OnDone>,
-    /// プレビューを作るための縮小版。読み込みが終わるまで `None`。
-    thumbnail: Option<Arc<image::RgbaImage>>,
     /// 切り抜いた範囲のプレビュー。gpui は親の角丸で子を切り抜かないので、
     /// 実際に切り抜いた画像を作って角丸で描く。
     preview: Option<Arc<RenderImage>>,
@@ -139,19 +176,21 @@ pub struct IconCropper {
 
 impl IconCropper {
     fn new(
-        image: PathBuf,
-        image_size: (u32, u32),
+        image: CropImage,
         source_id: String,
         icons_dir: PathBuf,
         on_done: OnDone,
+        window: &mut Window,
     ) -> Self {
-        let (width, height) = (image_size.0 as f32, image_size.1 as f32);
+        let (width, height) = (
+            image.original.width() as f32,
+            image.original.height() as f32,
+        );
         // 小さな画像も扱いやすいよう、表示範囲いっぱいまで拡大して見せる。
         let scale = (VIEW_MAX / width).min(VIEW_MAX / height);
         let view = (width * scale, height * scale);
-        Self {
+        let mut cropper = Self {
             image,
-            image_size,
             view,
             selection: Selection::centered(view.0, view.1),
             grab: Point::default(),
@@ -160,56 +199,26 @@ impl IconCropper {
             saving: false,
             error: None,
             on_done: Some(on_done),
-            thumbnail: None,
             preview: None,
-        }
-    }
-
-    /// プレビュー用の縮小版を読み込む。
-    fn load_thumbnail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let path = self.image.clone();
-        cx.spawn_in(window, async move |this, cx| {
-            let thumbnail = cx
-                .background_executor()
-                .spawn(async move {
-                    image::open(&path)
-                        .map(|image| image.thumbnail(THUMBNAIL_MAX, THUMBNAIL_MAX).to_rgba8())
-                })
-                .await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                match thumbnail {
-                    Ok(thumbnail) => {
-                        this.thumbnail = Some(Arc::new(thumbnail));
-                        this.refresh_preview(window);
-                    }
-                    Err(err) => this.error = Some(format!("画像を読めません: {err}")),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+        };
+        cropper.refresh_preview(window);
+        cropper
     }
 
     /// 枠の範囲からプレビューを作り直す。古いプレビューは GPU から外す。
     fn refresh_preview(&mut self, window: &mut Window) {
-        let Some(thumbnail) = self.thumbnail.clone() else {
-            return;
-        };
+        let thumbnail = &self.image.thumbnail;
         let scale = thumbnail.width() as f32 / self.view.0;
         let (x, y, size) = self
             .selection
             .to_source(scale, thumbnail.width(), thumbnail.height());
-        let cropped = imageops::crop_imm(&*thumbnail, x, y, size, size).to_image();
-        let mut pixels = imageops::resize(
+        let cropped = imageops::crop_imm(thumbnail, x, y, size, size).to_image();
+        let pixels = imageops::resize(
             &cropped,
             PREVIEW_PIXELS,
             PREVIEW_PIXELS,
             FilterType::Triangle,
         );
-        // gpui の画像は BGRA で持つ。
-        for pixel in pixels.pixels_mut() {
-            pixel.0.swap(0, 2);
-        }
         let preview = Arc::new(RenderImage::new(vec![image::Frame::new(pixels)]));
         if let Some(old) = self.preview.replace(preview) {
             let _ = window.drop_image(old);
@@ -278,11 +287,13 @@ impl IconCropper {
         if self.saving {
             return;
         }
-        let scale = self.image_size.0 as f32 / self.view.0;
-        let rect = self
-            .selection
-            .to_source(scale, self.image_size.0, self.image_size.1);
-        let image = self.image.clone();
+        let scale = self.image.original.width() as f32 / self.view.0;
+        let rect = self.selection.to_source(
+            scale,
+            self.image.original.width(),
+            self.image.original.height(),
+        );
+        let image = self.image.original.clone();
         let icons_dir = self.icons_dir.clone();
         let source_id = self.source_id.clone();
         self.saving = true;
@@ -329,9 +340,9 @@ impl Render for IconCropper {
         let selection = self.selection;
         let weak = cx.entity().downgrade();
         let (source_x, source_y, source_size) = selection.to_source(
-            self.image_size.0 as f32 / view_width,
-            self.image_size.0,
-            self.image_size.1,
+            self.image.original.width() as f32 / view_width,
+            self.image.original.width(),
+            self.image.original.height(),
         );
 
         let crop_area = div()
@@ -345,7 +356,7 @@ impl Render for IconCropper {
             .on_drag_move::<CropDrag>(cx.listener(Self::on_drag_move))
             .on_scroll(cx.listener(Self::on_scroll))
             .child(
-                img(self.image.clone())
+                img(self.image.display.clone())
                     .absolute()
                     .left_0()
                     .top_0()

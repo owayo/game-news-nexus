@@ -184,6 +184,8 @@ enum Loaded {
     Invalid(String, bool),
 }
 
+type EntryCheck = fn(&CatalogEntry, &str, &str) -> Vec<ConfigIssue>;
+
 impl Catalog {
     /// リポジトリのファイル (パスと中身) から作る。
     ///
@@ -206,6 +208,26 @@ impl Catalog {
         files: impl IntoIterator<Item = (P, T)>,
         previous: Option<&Catalog>,
         app_version: &str,
+    ) -> Self
+    where
+        P: AsRef<str>,
+        T: AsRef<str>,
+    {
+        Self::read_files(files, previous, app_version, check_entry)
+    }
+
+    /// アイコンが任意だった版の控えも、次にカタログを取り込むまで使えるようにする。
+    pub(crate) fn from_cached_files<'a>(
+        files: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Self {
+        Self::read_files(files, None, APP_VERSION, check_cached_entry)
+    }
+
+    fn read_files<P, T>(
+        files: impl IntoIterator<Item = (P, T)>,
+        previous: Option<&Catalog>,
+        app_version: &str,
+        check: EntryCheck,
     ) -> Self
     where
         P: AsRef<str>,
@@ -235,7 +257,7 @@ impl Catalog {
                 continue;
             };
             let (group, id) = (group.to_string(), id.to_string());
-            match load_entry(&path, &group, &id, text, app_version) {
+            match load_entry(&path, &group, &id, text, app_version, check) {
                 Loaded::Ok(entry) => catalog.push_entry(*entry),
                 Loaded::Unavailable(unavailable, message) => {
                     let kept = catalog.keep_previous(previous, &id, unavailable.adult);
@@ -626,7 +648,14 @@ fn source_path(path: &str) -> Option<(&str, &str)> {
     (!id.contains('/')).then_some((group, id))
 }
 
-fn load_entry(path: &str, group: &str, id: &str, text: &str, app_version: &str) -> Loaded {
+fn load_entry(
+    path: &str,
+    group: &str,
+    id: &str,
+    text: &str,
+    app_version: &str,
+    check: EntryCheck,
+) -> Loaded {
     // 1. 互換性に関わる項目だけを先に読む。新しい書式の未知の項目があっても読める。
     let header = match yaml::from_str::<Header>(text) {
         Ok(header) => header,
@@ -673,7 +702,7 @@ fn load_entry(path: &str, group: &str, id: &str, text: &str, app_version: &str) 
         forced_adult: false,
     };
     // 3. 中身とカタログの決まりを確かめる。
-    let issues = check_entry(&entry, id, app_version);
+    let issues = check(&entry, id, app_version);
     if !issues.is_empty() {
         return Loaded::Invalid(
             issues
@@ -697,6 +726,21 @@ fn hash(text: &str) -> String {
 ///
 /// CSS セレクタは `gnn-core` では検査できないので、`gnn-fetch` の検査と合わせて使う。
 pub fn check_entry(entry: &CatalogEntry, expected_id: &str, app_version: &str) -> Vec<ConfigIssue> {
+    let mut issues = check_cached_entry(entry, expected_id, app_version);
+    if entry.source.icon.is_none() {
+        issues.push(ConfigIssue {
+            field: "icon".into(),
+            message: "ゲームのアイコン画像の公開 HTTP(S) URL を指定してください".into(),
+        });
+    }
+    issues
+}
+
+fn check_cached_entry(
+    entry: &CatalogEntry,
+    expected_id: &str,
+    app_version: &str,
+) -> Vec<ConfigIssue> {
     let source = &entry.source;
     let mut issues = source.validate();
     let mut push = |field: &str, message: String| {
@@ -1011,6 +1055,7 @@ schema: 2
 min_app_version: '26.11.6'
 id: mist
 name: ミスト
+icon: 'https://example.com/icon.png'
 lists:
   - kind: json
     request:
@@ -1110,6 +1155,38 @@ lists:
         assert!(message(1).contains("secret"), "{}", message(1));
         assert!(message(2).contains("手元のネットワーク"), "{}", message(2));
         assert!(message(4).contains("min_app_version"), "{}", message(4));
+    }
+
+    #[test]
+    fn catalog_requires_a_public_icon_url_and_keeps_the_previous_entry_on_error() {
+        let path = "sources/dmm/mist.yaml";
+        let icon = "icon: 'https://example.com/icon.png'";
+        let previous = Catalog::from_files([(path, MIST)], None);
+        assert!(previous.problems().is_empty());
+        for invalid in [
+            "",
+            "icon: null",
+            "icon: ''",
+            "icon: '   '",
+            "icon: 'file:///icon.png'",
+            "icon: 'http://127.0.0.1/icon.png'",
+        ] {
+            let text = MIST.replace(icon, invalid);
+            let catalog = Catalog::from_files([(path, text)], Some(&previous));
+            let [problem] = catalog.problems() else {
+                panic!("icon が検査されませんでした: {invalid}")
+            };
+            assert_eq!(problem.path, path);
+            assert_eq!(problem.kind, ProblemKind::Invalid);
+            assert!(problem.message.contains("icon"), "{}", problem.message);
+            assert!(problem.kept_previous);
+            assert_eq!(catalog.get("mist"), previous.get("mist"));
+        }
+
+        let old = MIST.replace(icon, "");
+        let cache = Catalog::from_cached_files([(path, old.as_str())]);
+        assert!(cache.problems().is_empty());
+        assert!(cache.get("mist").unwrap().source.icon.is_none());
     }
 
     #[test]

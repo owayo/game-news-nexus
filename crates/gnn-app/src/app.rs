@@ -338,15 +338,13 @@ fn open_dev_cropper(handle: AnyWindowHandle, cx: &mut App) {
     };
     let icons_dir = app_state.read(cx).services().paths().icons_dir();
     let _ = handle.update(cx, |_, window, cx| {
-        crate::ui::icon_cropper::open_cropper(
-            std::path::PathBuf::from(image),
+        crate::ui::icon_cropper::CropTarget::new(
             source.id.clone(),
             source.name.clone(),
             icons_dir,
-            window,
-            cx,
             |path, _, _| tracing::info!("開発用の切り抜き: {}", path.display()),
-        );
+        )
+        .open_file(std::path::PathBuf::from(image), window, cx);
     });
 }
 
