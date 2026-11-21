@@ -167,9 +167,13 @@ impl NewsPage {
                 AppEvent::EntriesChanged | AppEvent::AgendaChanged => this.reload(cx),
                 AppEvent::ReadChanged { ids, read } => {
                     // 未読だけの一覧でも、読んだ記事は次に読み直すまで残す (見ている行を消さない)。
-                    for id in ids {
-                        this.set_read_local(*id, *read, cx);
+                    let ids: HashSet<_> = ids.iter().copied().collect();
+                    for entry in &mut this.entries {
+                        if ids.contains(&entry.id) {
+                            entry.read = *read;
+                        }
                     }
+                    cx.notify();
                 }
                 AppEvent::NewEntries(_) => {}
             }),
@@ -574,18 +578,6 @@ impl NewsPage {
         }
     }
 
-    /// 一覧の行の既読だけを変える。
-    fn set_read_local(&mut self, id: i64, read: bool, cx: &mut Context<Self>) {
-        if let Some(entry) = self
-            .entries
-            .iter_mut()
-            .find(|entry| entry.id == id && entry.read != read)
-        {
-            entry.read = read;
-            cx.notify();
-        }
-    }
-
     /// 選べる行の位置 (見出しを除く)。
     fn entry_positions(&self) -> Vec<usize> {
         self.rows
@@ -636,7 +628,7 @@ impl NewsPage {
     }
 
     fn on_mark_all_read(&mut self, _: &MarkAllRead, window: &mut Window, cx: &mut Context<Self>) {
-        self.mark_all_read(window, cx);
+        self.mark_list_read(window, cx);
     }
 
     fn on_focus_search(&mut self, _: &FocusSearch, window: &mut Window, cx: &mut Context<Self>) {
@@ -653,10 +645,22 @@ impl NewsPage {
         }
     }
 
-    /// 一覧の条件 (ゲーム・検索・未読) に合う未読の記事を、読み込んだ件数によらずすべて既読にする。
+    /// 利用中の全ソースのお知らせを、一覧の絞り込みにかかわらず既読にする。
+    pub(super) fn mark_all_read(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let query = EntryQuery {
+            source_ids: Some(self.app.read(cx).enabled_ids(Channel::News)),
+            ..EntryQuery::channel(Channel::News)
+        };
+        self.mark_read_matching(query, window, cx);
+    }
+
+    fn mark_list_read(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.mark_read_matching(self.entry_query(cx), window, cx);
+    }
+
+    /// 条件に合う未読の記事を、読み込んだ件数によらずすべて既読にする。
     /// 「元に戻す」で、既読にした記事だけを未読に戻せる。
-    fn mark_all_read(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let query = self.entry_query(cx);
+    fn mark_read_matching(&self, query: EntryQuery, window: &mut Window, cx: &mut Context<Self>) {
         let app = self.app.clone();
         let services = app.read(cx).services().clone();
         cx.spawn_in(window, async move |_, cx| {
@@ -871,7 +875,7 @@ impl NewsPage {
                                     .on_click(
                                         move |_, window, cx| {
                                             let _ = page.update(cx, |page, cx| {
-                                                page.mark_all_read(window, cx)
+                                                page.mark_list_read(window, cx)
                                             });
                                         },
                                     ),

@@ -14,7 +14,9 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::status_bar::StatusBar;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _, TitleBar, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, Icon, Sizable as _, TitleBar, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable,
@@ -176,22 +178,42 @@ impl Workspace {
                     .child(div().text_sm().font_semibold().child("Game News Nexus")),
             )
             .child(
-                h_flex().px_2().child(
-                    Button::new("title-refresh")
-                        .small()
-                        .ghost()
-                        .icon(IconName::RefreshCw)
-                        .label(if running > 0 {
-                            format!("{running} 件を取得中")
-                        } else {
-                            "すべて取得".to_string()
-                        })
-                        .loading(running > 0)
-                        .tooltip(REFRESH_TOOLTIP)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.app.update(cx, |app, cx| app.fetch_now(None, cx))
-                        })),
-                ),
+                h_flex()
+                    .px_2()
+                    .gap_2()
+                    // Windows でボタンの位置がタイトルバーのドラッグ領域と判定されるのを防ぐ。
+                    .occlude()
+                    .when(self.page == Page::News, |bar| {
+                        bar.child(
+                            Button::new("title-mark-all-read")
+                                .small()
+                                .ghost()
+                                .icon(IconName::CheckCheck)
+                                .label("すべて既読にする")
+                                .tooltip("利用中のすべてのソースのお知らせを既読にする")
+                                .disabled(app.unread_total(Channel::News) == 0)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.news
+                                        .update(cx, |news, cx| news.mark_all_read(window, cx));
+                                })),
+                        )
+                    })
+                    .child(
+                        Button::new("title-refresh")
+                            .small()
+                            .ghost()
+                            .icon(IconName::RefreshCw)
+                            .label(if running > 0 {
+                                format!("{running} 件を取得中")
+                            } else {
+                                "すべて取得".to_string()
+                            })
+                            .loading(running > 0)
+                            .tooltip(REFRESH_TOOLTIP)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.app.update(cx, |app, cx| app.fetch_now(None, cx))
+                            })),
+                    ),
             )
     }
 
